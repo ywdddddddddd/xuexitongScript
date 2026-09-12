@@ -11,6 +11,7 @@
  *   F2 同一章 3 个视频节点按 1→2→3 推进；解析失败时明确报错且不静默跳章
  *   F3 无视频节点：可识别完成才前进，识别不了则安全停止且连续前进受上限约束
  *   F21 空视频节点（标题「视频」但平台内容占位「暂无内容」）不按加载失败重试触顶，转入无视频流程
+ *   F22 手动暂停/切节点后恢复：僵尸 iframe 文档里的 video 不再被复用，超时自动重新定位
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -758,6 +759,66 @@ test('F21-4 视频任务点 iframe（jobid=video-*）存在时，空节点判定
     await writeFrame(env, 'iframe', '暂无内容');
     const app = await env.boot();
     check('F21-4 有视频任务点 iframe 时判定为空节点=false', app._isEmptyContentVideoNode() === false, '');
+});
+
+// ---------------------------------------------------------------------------
+// F22 手动暂停/切节点后恢复（僵尸 iframe 文档里的 video，真机：GUI 暂停→看别的节点→点继续）
+// ---------------------------------------------------------------------------
+
+test('F22-1 僵尸 iframe 文档里的 video 判定失效，play() 自动重新定位到活动帧', async () => {
+    const { env, video } = await envWithTree(chapterSpecs(['1.1'], ['2.1']), { stepTitle: '视频' });
+    const app = await env.boot();
+    check('F22-1 初始缓存视频有效', app._isLiveVideoElement(video) === true && app._videoEl === video, '');
+    // 模拟用户手动切节点 / 平台重建 iframe：移除旧 iframe，另建新的活动帧
+    env.window.document.getElementById('player').remove();
+    const newFrame = env.window.document.createElement('iframe');
+    newFrame.id = 'player2';
+    newFrame.setAttribute('src', 'about:blank');
+    env.window.document.body.appendChild(newFrame);
+    await env.advance(50);
+    const ndoc = await writeFrame(env, 'player2', '<video id="video_html5_api" src="https://example.com/b.mp4"></video>');
+    const newVideo = stubVideo(env, ndoc.getElementById('video_html5_api'), {});
+    check('F22-1 旧元素被判定为僵尸（失效）', app._isLiveVideoElement(video) === false, '');
+    check('F22-1 新元素被判定为有效', app._isLiveVideoElement(newVideo) === true, '');
+    app._isPlaying = false;
+    app.play();
+    await env.advance(3000);
+    check('F22-1 自动放弃僵尸缓存并播放新视频', newVideo.__calls.play >= 1, 'calls=' + newVideo.__calls.play);
+    check('F22-1 缓存已切换到新视频', app._videoEl === newVideo, '');
+});
+
+test('F22-2 play() 首次超时（僵尸元素/管线冻结）→ 强制重新定位一次并自动恢复', async () => {
+    const { env, video } = await envWithTree(chapterSpecs(['1.1'], ['2.1']), { stepTitle: '视频' });
+    let calls = 0;
+    const realPlay = video.play;
+    video.play = function () {
+        calls++;
+        if (calls === 1) return new Promise(() => {}); // 首次永不 settle
+        return realPlay.call(video);
+    };
+    const app = await env.boot();
+    await env.advance(12000);
+    check('F22-2 play() 至少被调用 2 次（超时后重新定位重试）', calls >= 2, 'calls=' + calls);
+    check('F22-2 打印重新定位日志', env.xt.has('重新定位'), JSON.stringify(env.xt.logs.slice(-6)));
+    check('F22-2 最终进入播放状态', app._isPlaying === true, '');
+});
+
+test('F22-3 GUI 恢复播放前重新同步：清理僵尸缓存并播放活动帧视频', async () => {
+    const { env } = await envWithTree(chapterSpecs(['1.1'], ['2.1']), { stepTitle: '视频' });
+    const app = await env.boot();
+    env.window.document.getElementById('player').remove();
+    const f2 = env.window.document.createElement('iframe');
+    f2.id = 'player3';
+    f2.setAttribute('src', 'about:blank');
+    env.window.document.body.appendChild(f2);
+    await env.advance(50);
+    const d2 = await writeFrame(env, 'player3', '<video id="video_html5_api" src="https://example.com/c.mp4"></video>');
+    const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
+    app._isPlaying = false;
+    app._resumeAfterManualPause();
+    await env.advance(3000);
+    check('F22-3 恢复后缓存切换到新视频', app._videoEl === v2, '');
+    check('F22-3 新视频已开始播放', v2.__calls.play >= 1, 'calls=' + v2.__calls.play);
 });
 
 // ---------------------------------------------------------------------------

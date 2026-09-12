@@ -249,6 +249,7 @@
                 this._interactionBlocked = false;
                 this._tryTimes = 0;
                 this._emptyContentStreak = 0;
+                this._videoRefreshTried = false;
                 this._currentVideoTaskIndex = 0;
                 this._videoTaskCount = 0;
                 this._videoTaskAllComplete = false;
@@ -711,6 +712,8 @@
             _tryTimes: 0,
             // F21（V3.6 补丁）：空视频节点（平台内容帧「暂无内容」）连续命中计数，连续 2 次才转入无视频流程。
             _emptyContentStreak: 0,
+            // F22（V3.6 补丁）：play() 超时后「强制失效缓存并重新定位」是否已用过（播放成功/切换小节/run 后重置）。
+            _videoRefreshTried: false,
             _stepAdvanceTimes: 0,
             _stepSwitchAt: 0,
             _stepSwitchPending: false,
@@ -798,10 +801,21 @@
                         // PR #56：play() 可能永不 settle，这里加超时保护，超时按播放失败处理（重试/静音兜底）。
                         await this._withTimeout(el.play(), this.configs.playTimeoutMs, 'play() 超时，播放器未进入播放状态');
                         this._tryTimes = 0;
+                        this._videoRefreshTried = false;
                         console.log(`%c视频开始播放，倍速: ${el.playbackRate}x`, 'color:#4CAF50');
                         this._startVideoMonitoring();
                     } catch (playError) {
                         console.error('视频播放失败:', playError);
+                        // F22：超时往往意味着拿到的是僵尸文档里的旧 video（play() 永不 settle）。
+                        // 强制失效缓存并重新定位一次，能恢复就继续播；仍失败才走原有静音兜底/重试链。
+                        const timeoutLike = /超时/.test(String((playError && playError.message) || playError));
+                        if (timeoutLike && !this._videoRefreshTried) {
+                            this._videoRefreshTried = true;
+                            this._invalidateVideoCache('play() 超时，重新定位视频元素');
+                            console.log('%c播放超时：已失效视频缓存并重新定位，重试一次', 'color:#FF9800');
+                            this._schedule(() => this.play(), 300);
+                            return;
+                        }
                         this._handlePlayError(playError);
                     }
                 } catch (e) {
@@ -1497,6 +1511,7 @@
                 this._withTimeout(mutedAttempt, this.configs.playTimeoutMs, '静音 play() 超时，播放器未进入播放状态').then(() => {
                     console.log('%c静音播放成功', 'color:#4CAF50');
                     this._tryTimes = 0;
+                    this._videoRefreshTried = false;
                     this._startVideoMonitoring();
                     this._cancelDelayedNextUnit('静音恢复成功');
                 }).catch((e) => {
@@ -1515,6 +1530,19 @@
                         this.play();
                     }, this.configs.retryInterval);
                 });
+            },
+            _resumeAfterManualPause() {
+                // F22：GUI「暂停/继续」的恢复路径 —— 暂停期间页面可能已被用户手动改动。
+                try {
+                    this._invalidateVideoCache('GUI 恢复播放前重新同步');
+                } catch (e) { /* ignore */ }
+                try {
+                    this._initCellData();
+                } catch (e) {
+                    console.warn('恢复播放前重新解析课程目录失败:', e);
+                }
+                this._videoRefreshTried = false;
+                this.play();
             },
             _invalidateVideoCache(reason) {
                 // F6（#52 #55）：显式失效视频元素缓存 —— 切换小节、iframe 重载、播放器换源后
@@ -1558,6 +1586,7 @@
                 this._cancelDelayedNextUnit('切换小节');
                 this._isPlaying = false;
                 this._emptyContentStreak = 0;
+                this._videoRefreshTried = false;
                 this._currentVideoTaskIndex = 0;
                 this._llmChapterSuggesting = false;
                 this._llmChapterSuggestDone = false;
@@ -1636,10 +1665,38 @@
                 if (video.currentSrc) return true;
                 return !!(video.querySelector && video.querySelector('source[src]'));
             },
+            _isLiveVideoElement(el) {
+                // F22（真机：GUI 暂停后手动切节点再点「继续」→ play() 反复超时）：
+                // iframe 被重建/移除后，旧文档里的 video 会处于「isConnected 仍为 true，
+                // 但 ownerDocument.defaultView === null（文档已脱离浏览上下文）」的僵尸状态；
+                // 对这种元素调用 play() 既不 resolve 也不 reject，只会白白耗尽重试次数。
+                if (!el) return false;
+                try {
+                    if (el.isConnected === false) return false;
+                    const doc = el.ownerDocument;
+                    if (!doc) return false;
+                    const win = doc.defaultView;
+                    if (win === null) return false;   // 僵尸文档：iframe 已移除/替换
+                    if (!win) return true;            // 测试桩环境（无 window）：不做过度判定
+                    let cursor = win;
+                    let guard = 0;
+                    // 若环境支持 frameElement，则沿 iframe 链向上确认容器仍挂在活动树上。
+                    while (cursor && cursor !== window && guard++ < 8) {
+                        const frameEl = cursor.frameElement;
+                        if (frameEl === undefined) return true; // 环境不支持：放弃二级判定
+                        if (!frameEl || frameEl.isConnected === false) return false;
+                        cursor = frameEl.ownerDocument && frameEl.ownerDocument.defaultView;
+                    }
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            },
             _getVideoEl() {
                 // F6（#18 #52 #55）：扩大选择器覆盖 + 提高嵌套 frame 搜索深度（带上限）+ 缓存失效。
-                if (this._videoEl && this._videoEl.isConnected === false) {
-                    this._invalidateVideoCache('缓存的视频节点已脱离文档（iframe 重载）');
+                // F22：改用「活动浏览上下文」判定，覆盖 isConnected 仍为 true 的僵尸文档（真机复现：手动切节点后）。
+                if (this._videoEl && !this._isLiveVideoElement(this._videoEl)) {
+                    this._invalidateVideoCache('缓存的视频节点已脱离文档（iframe 重载/手动切节点，僵尸文档）');
                 }
                 if (!this._videoEl) {
                     try {
@@ -2046,7 +2103,9 @@
                         console.log('%c[GUI] 已暂停自动播放（点「暂停/继续」恢复）', 'color:#FF9800');
                     } else {
                         console.log('%c[GUI] 恢复自动播放', 'color:#4CAF50');
-                        this.play();
+                        // F22：暂停期间用户可能手动切过节点、平台重建过 iframe → 先重新同步再恢复，
+                        // 避免拿着旧节点/僵尸元素反复 play() 超时（真机事故路径）。
+                        this._resumeAfterManualPause();
                     }
                 });
                 addBtn('下一节', '立即切换到下一小节', () => this.nextUnit());

@@ -22,13 +22,15 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F21 | 老师没上传视频的「视频」小节：重试 10 次后卡死（真机演练：第 16 章 16.1.2） | 真机长流程演练 | 新增空节点识别 `_isEmptyContentVideoNode()`：内容帧（`/knowledge/cards` 或 `#iframe`）已加载且正文为「暂无内容」、全页又没有任何视频证据时，连续 2 次确认后转入既有的无视频节点流程——有完成标记/任务点图标级证据就有界前进，否则安全停止（或按 `autoAdvanceNoVideo` 有界前进），不再按「视频组件尚未加载完成」重试到触顶 |
 
+| F22 | 暂停后手动切节点再点「继续」→ 反复 `play() 超时` 卡死 | 真机演练（课程 8「2.1 资料」） | 视频缓存存活判定升级为「活动浏览上下文」检查：iframe 被重建/移除后，旧文档里的 video 虽 `isConnected=true` 但 `defaultView=null`（僵尸文档），一律失效；`play()` 超时后强制失效缓存并重新定位一次；GUI「继续」恢复前先重新同步目录与缓存，不再复用手动切节点后的僵尸元素 |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
 - [v3_optimized.user.js](v3_optimized.user.js) —— Tampermonkey 油猴版（构建产物）
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F21，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F22，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
@@ -226,6 +228,7 @@ V3.5 在原有控制台交互（`app.run()` / `app.nextUnit()` / `app.resumeAuto
 ### 控制台常见报错怎么处理？
 
 - 「找不到视频列表」：不在课程播放页，或目录还没加载完
+- 「play() 超时，播放器未进入播放状态」：多为**手动切过节点/平台重建 iframe** 后，脚本缓存到了已脱离活动文档的旧 video 元素；F22 会自动失效缓存并重新定位一次，通常即可恢复。若仍连续失败，脚本按重试上限停下——刷新页面后执行 `app.run()` 即可
 - 「视频组件尚未加载完成」：播放器 iframe 还没就绪，脚本会按 `retryInterval` 重试，最多 `maxRetries` 次；若属于**老师没上传内容**的空节点（内容帧显示「暂无内容」），F21 会在连续 2 次确认后转入无视频流程，不再重试到触顶
 - 「无法解析当前课程节点」：目录里没有 `.posCatalog_active` 高亮（页面未渲染完或结构变化），脚本会停止自动跳转；手动点一下目标小节再 `app.run()` 即可
 - 「当前小节未发现视频，且无法识别…已安全停止」：属于纯课件/已完成小节；确认无误后 `app.nextUnit()`，或把 `autoAdvanceNoVideo` 设为 `true` 让脚本有界自动前进（#38 #43）
