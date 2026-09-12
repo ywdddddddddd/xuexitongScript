@@ -922,6 +922,26 @@ test('F11-1 未完成的内嵌章节测验：默认不跳过、不自动前进�
     await env.advance(3000);
     check('F11-1 nextUnit() 同样被守卫（不跳转）', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
 });
+test('F12-1 片尾停滞保护：已播放≥90%且平台已标记完成 → 直接推进（真机演练回归）', async () => {
+    const { env, video } = await envWithTree(chapterSpecs(['1.1'], ['2.1']), { stepTitle: '视频' });
+    const app = await env.boot();
+    await env.advance(1500);
+    app._isPlaying = true;
+    app._getVideoTaskFrames = () => [{}];
+    app._areAllVideoTasksComplete = () => true;
+    let endedCalls = 0;
+    app._handleVideoEnded = () => { endedCalls++; };
+    Object.defineProperty(video, 'duration', { configurable: true, get: () => 100 });
+    video.paused = false;
+    video.currentTime = 95;
+    app._checkVideoStatus();
+    check('F12-1 达到 90% 且平台完成 → 触发片尾完成', endedCalls === 1, 'calls=' + endedCalls);
+    check('F12-1 打印片尾完成日志', env.xt.has('按片尾完成处理并推进'), '');
+    endedCalls = 0;
+    video.currentTime = 50;
+    app._checkVideoStatus();
+    check('F12-1 未达到 90% 不触发', endedCalls === 0, 'calls=' + endedCalls);
+});
 test('F9-1 GUI 面板：默认注入、状态可见、destroy 后移除、可配置关闭', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
     const app = await env.boot();

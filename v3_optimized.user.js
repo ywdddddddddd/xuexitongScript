@@ -130,6 +130,8 @@
                 taskDialogMaxClicksPerUnit: 3,
                 videoTaskFrameMaxDepth: 4,
                 videoTaskFrameMaxCount: 12,
+                // F12（V3.6）：片尾停滞保护——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进。
+                videoCompleteRatio: 0.9,
                 // F9（V3.5）：GUI 可视化面板。纯本地 DOM，不产生任何额外网络请求。
                 guiEnabled: true,
                 guiMaxLogLines: 60,
@@ -566,6 +568,20 @@
                         this._guardLastTime = current;
                     }
 
+                    // F12（V3.6）：片尾停滞保护 —— 平台会在片尾主动暂停（恢复次数耗尽后假死）。已播放 ≥ videoCompleteRatio
+                    // 且平台已完成标记时，视同片尾完成直接推进（真机演练：4、宋 元 卡在 255/261，平台已 complete=true）。
+                    if (this._isPlaying && !video.ended) {
+                        try {
+                            const ratio = Number(this.configs.videoCompleteRatio) || 0.9;
+                            const frames = this._getVideoTaskFrames ? this._getVideoTaskFrames() : [];
+                            const platformDone = frames.length > 0 && this._areAllVideoTasksComplete ? this._areAllVideoTasksComplete(frames) : false;
+                            if (platformDone && video.duration > 0 && current / video.duration >= ratio) {
+                                console.log('%c视频已播放 ≥ ' + Math.round(ratio * 100) + '% 且平台已标记任务点完成，按片尾完成处理并推进', 'color:#4CAF50');
+                                this._handleVideoEnded();
+                                return;
+                            }
+                        } catch (e) { /* 保底：不阻塞主流程 */ }
+                    }
                     if (video.paused && this._isPlaying) {
                         if (this._isProgressStalled(now)) {
                             console.log('%c检测到视频暂停且进度停滞，按有界策略尝试恢复播放...', 'color:#FF5722');
