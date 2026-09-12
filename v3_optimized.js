@@ -118,6 +118,9 @@
                 videoTaskFrameMaxCount: 12,
                 // F12（V3.6）：片尾停滞保护——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进。
                 videoCompleteRatio: 0.9,
+                // F15（V3.6）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停（真机实测：window 上 mouseout 监听调用 pause()）。
+                // 只拦截「无用户意图」的暂停；最近 1.5 秒有点击/按键的操作仍正常放行。
+                pauseGuard: true,
                 // F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭；开启后自动滚动文档到底部并等待平台标记完成。
                 docTaskScroll: false,
                 docTaskScrollStepMs: 800,
@@ -664,6 +667,7 @@
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
             _progressStreakStart: 0,
+            _pauseGuardBlocked: 0,
             _guardProbeTimer: null,
             _seekBackTimesThisUnit: 0,
             _seekBackCapLogged: false,
@@ -1523,6 +1527,29 @@
                 if (!this._videoEl) return null;
                 return this._videoEl;
             },
+            // F15（V3.6）：给 video.pause 加「用户意图」白名单，拦截平台防挂机暂停。
+            // 实测：平台在 window 上监听鼠标移出（mouseout）并调用播放器 pause()，鼠标进出页面即暂停视频。
+            // 原则：不劫持任何鼠标事件（F4 教训），只拦截「最近无点击/按键」的暂停调用，保留用户主动暂停。
+            _installPauseGuard(el) {
+                if (!this.configs.pauseGuard) return;
+                if (!el || el.__xtPauseGuard) return;
+                el.__xtPauseGuard = true;
+                const self = this;
+                const origPause = el.pause.bind(el);
+                el.pause = function () {
+                    try {
+                        const recentUser = Date.now() - (self._lastUserInteractionTs || 0) < 1500;
+                        if (self._isPlaying && !self._userPaused && !recentUser) {
+                            self._pauseGuardBlocked++;
+                            if (self._pauseGuardBlocked <= 3) {
+                                console.log('%c[防挂机] 已拦截平台防挂机暂停（鼠标移出页面触发，第 ' + self._pauseGuardBlocked + ' 次）', 'color:#4CAF50');
+                            }
+                            return;
+                        }
+                    } catch (e) { /* 异常时放行 */ }
+                    return origPause();
+                };
+            },
             _videoEventHandle() {
                 const el = this._videoEl;
                 if (!el) {
@@ -1540,6 +1567,7 @@
                     pause: this._handleVideoPause.bind(this),
                 };
 
+                this._installPauseGuard(el);
                 el.addEventListener('ended', this._boundVideoHandlers.ended);
                 el.addEventListener('loadedmetadata', this._boundVideoHandlers.loadedmetadata);
                 el.addEventListener('play', this._boundVideoHandlers.play);

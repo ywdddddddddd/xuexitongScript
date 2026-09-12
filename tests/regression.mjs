@@ -942,6 +942,21 @@ test('F12-1 片尾停滞保护：已播放≥90%且平台已标记完成 → 直
     app._checkVideoStatus();
     check('F12-1 未达到 90% 不触发', endedCalls === 0, 'calls=' + endedCalls);
 });
+test('F15-1 防挂机暂停拦截：无用户意图的 pause 被拦、用户点击后的 pause 放行', async () => {
+    const { env, video } = await envWithTree(chapterSpecs(['1.1']), { stepTitle: '视频' });
+    const app = await env.boot();
+    await env.advance(1500);
+    check('F15-1 pause 守卫已安装', video.__xtPauseGuard === true, 'guard=' + video.__xtPauseGuard);
+    app._isPlaying = true;
+    app._userPaused = false;
+    app._lastUserInteractionTs = 0;
+    video.pause();
+    check('F15-1 拦截无用户意图的暂停（平台防挂机）', video.paused === false, 'paused=' + video.paused);
+    check('F15-1 打印拦截日志', env.xt.has('已拦截平台防挂机暂停'), '');
+    app._lastUserInteractionTs = Date.now();
+    video.pause();
+    check('F15-1 用户点击后的暂停放行', video.paused === true, 'paused=' + video.paused);
+});
 test('F13-1 文档任务点（教案/PDF）：默认绝不跳过；开启后滚动到底并等待完成', async () => {
     const docHtml = '<div class="ans-attach-ct"><div class="ans-job-icon"></div>'
         + '<iframe id="docFrame" jobid="doc-1" src="/ananas/modules/pdf/index.html"></iframe></div>';
