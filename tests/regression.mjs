@@ -942,6 +942,32 @@ test('F12-1 片尾停滞保护：已播放≥90%且平台已标记完成 → 直
     app._checkVideoStatus();
     check('F12-1 未达到 90% 不触发', endedCalls === 0, 'calls=' + endedCalls);
 });
+test('F13-1 文档任务点（教案/PDF）：默认绝不跳过；开启后滚动到底并等待完成', async () => {
+    const docHtml = '<div class="ans-attach-ct"><div class="ans-job-icon"></div>'
+        + '<iframe id="docFrame" jobid="doc-1" src="/ananas/modules/pdf/index.html"></iframe></div>';
+    const html = tree(chapterSpecs(['1.1'], ['2.1'])) + '<div class="prev_title" title="教案"></div>' + docHtml;
+    const env = createEnv({ html });
+    const app = await env.boot();
+    await env.advance(20000);
+    check('F13-1 检测到未完成文档任务点', env.xt.has('未完成文档任务点'), '');
+    check('F13-1 默认不自动前进（树节点零点击）', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
+    // 开启自动翻阅：用可滚动容器替身（jsdom 无法加载 iframe 资源）
+    app.configs.docTaskScroll = true;
+    const scroller = env.window.document.createElement('div');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 300, configurable: true });
+    let scrollTop = 0;
+    Object.defineProperty(scroller, 'scrollTop', { get: () => scrollTop, set: (v) => { scrollTop = v; }, configurable: true });
+    env.window.document.body.appendChild(scroller);
+    app._docScroller = () => scroller;
+    app.run();
+    await env.advance(8000);
+    check('F13-1 开启后开始翻阅文档', env.xt.has('开始翻阅') && scrollTop > 0, 'scrollTop=' + scrollTop);
+    // 模拟平台标记完成
+    env.window.document.querySelector('.ans-attach-ct').classList.add('ans-job-finished');
+    await env.advance(40000);
+    check('F13-1 完成后打印全部完成并推进', env.xt.has('已全部完成，继续推进'), '');
+});
 test('F9-1 GUI 面板：默认注入、状态可见、destroy 后移除、可配置关闭', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
     const app = await env.boot();

@@ -60,6 +60,10 @@ taskDialogMaxClicksPerUnit: 3
 videoTaskFrameMaxDepth: 4
 videoTaskFrameMaxCount: 12
 videoCompleteRatio: 0.9
+docTaskScroll: false
+docTaskScrollStepMs: 800
+docTaskMaxSteps: 60
+docTaskWaitMs: 20000
 guiEnabled: true
 guiMaxLogLines: 60
 llmEnabled: false
@@ -96,6 +100,7 @@ llmWorkWaitMs: 90000
 - `llmWorkWaitMs`（默认 90000）：提交后等待任务点标记完成的最长时间；工作页出现「待批阅/已完成/已提交」同样视为提交成功；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。
+- `docTaskScroll`（默认 **false**，V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）；开启后自动把文档滚动到底部并等待平台标记完成。
 ## 使用方法
 
 ### 方法一：浏览器控制台

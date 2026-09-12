@@ -118,6 +118,11 @@
                 videoTaskFrameMaxCount: 12,
                 // F12（V3.6）：片尾停滞保护——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进。
                 videoCompleteRatio: 0.9,
+                // F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭；开启后自动滚动文档到底部并等待平台标记完成。
+                docTaskScroll: false,
+                docTaskScrollStepMs: 800,
+                docTaskMaxSteps: 60,
+                docTaskWaitMs: 20000,
                 // F9（V3.5）：GUI 可视化面板。纯本地 DOM，不产生任何额外网络请求。
                 guiEnabled: true,
                 guiMaxLogLines: 60,
@@ -185,6 +190,7 @@
             _llmChapterSuggestDone: false,
             _llmChapterSuggestedCount: 0,
             _workBusy: false,
+            _docTaskBusy: false,
             // 思路移植自 PR #48 @CsuCook1e：小节内视频任务点与任务点弹窗状态
             _currentVideoTaskIndex: 0,
             _videoTaskCount: 0,
@@ -258,6 +264,12 @@
                 if (this._hasUnfinishedEmbeddedWork()) {
                     console.log('%c当前小节还有未完成的内嵌章节测验/作业，先处理作业再跳转', 'color:#FF9800');
                     this._handleEmbeddedWorks();
+                    return;
+                }
+                // F13（V3.6）：当前小节还有未完成的文档任务点（PDF/PPT/教案）时，先翻阅完再跳转。
+                if (this._hasUnfinishedDocTask()) {
+                    console.log('%c当前小节还有未完成的文档任务点（PDF/PPT），先翻阅再跳转', 'color:#FF9800');
+                    this._handleDocTasks();
                     return;
                 }
                 // t6：进入 nextUnit 前先取消任何待执行的「视频结束自动跳转」，避免旧定时器把刚打开的小节又跳一次。
@@ -623,6 +635,11 @@
                         // （修复真机演练发现的「autoAdvanceNoVideo 把章节检验当未知节点跳过」问题）。
                         if (this._hasUnfinishedEmbeddedWork()) {
                             this._handleEmbeddedWorks();
+                            return;
+                        }
+                        // F13（V3.6）：未完成的文档任务点（PDF/PPT/教案）自动翻阅（真机演练：教案节点被判「无法识别」跳过）。
+                        if (this._hasUnfinishedDocTask()) {
+                            this._handleDocTasks();
                             return;
                         }
                         if (this._advanceLearningStep()) {
@@ -2601,6 +2618,120 @@
                     askNext(0);
                 };
                 nextWork(0);
+                return true;
+            },
+            // ================= F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅 =================
+            _findDocTaskFrames() {
+                const found = [];
+                const seen = new Set();
+                const visit = (doc, depth) => {
+                    if (!doc || depth > 6 || seen.has(doc)) return;
+                    seen.add(doc);
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        let jobid = '';
+                        let src = '';
+                        try { jobid = String(frame.getAttribute('jobid') || ''); src = String(frame.getAttribute('src') || ''); } catch (e) { jobid = ''; src = ''; }
+                        if (jobid && /\/modules\//.test(src) && !/\/modules\/(video|work)\//.test(src)) {
+                            let holder = null;
+                            try { holder = frame.closest ? frame.closest('.ans-attach-ct') : null; } catch (e) { holder = null; }
+                            const finished = holder ? holder.classList.contains('ans-job-finished') : false;
+                            found.push({ frame: frame, holder: holder, finished: finished, jobid: jobid, src: src });
+                            continue;
+                        }
+                        let childDoc = null;
+                        try { childDoc = frame.contentDocument; } catch (e) { childDoc = null; }
+                        if (childDoc) visit(childDoc, depth + 1);
+                    }
+                };
+                visit(typeof document === 'undefined' ? null : document, 0);
+                return found;
+            },
+            _hasUnfinishedDocTask() {
+                try { return this._findDocTaskFrames().some((d) => !d.finished); } catch (e) { return false; }
+            },
+            _docScroller(doc) {
+                let best = null;
+                const visit = (d, dep) => {
+                    if (!d || dep > 6 || best) return;
+                    const cands = [];
+                    try { cands.push(d.scrollingElement, d.documentElement, d.body); } catch (e) { /* ignore */ }
+                    try { const els = Array.from(d.querySelectorAll('div, main, section')); for (const el of els.slice(0, 400)) cands.push(el); } catch (e) { /* ignore */ }
+                    for (const el of cands) {
+                        try { if (el && el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 80) { best = el; return; } } catch (e) { /* ignore */ }
+                    }
+                    let frames = [];
+                    try { frames = Array.from(d.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const f of frames) {
+                        let cd = null;
+                        try { cd = f.contentDocument; } catch (e) { cd = null; }
+                        if (cd) visit(cd, dep + 1);
+                        if (best) return;
+                    }
+                };
+                visit(doc, 0);
+                return best;
+            },
+            _scrollDocToEnd(scroller, step, maxSteps, cb) {
+                let i = 0;
+                const tick = () => {
+                    if (!scroller) { cb(false, '未找到可滚动容器'); return; }
+                    try {
+                        const max = scroller.scrollHeight - scroller.clientHeight;
+                        const next = Math.min(max, (scroller.scrollTop || 0) + step);
+                        scroller.scrollTop = next;
+                        try { scroller.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (e) { /* ignore */ }
+                        if (next >= max - 5 || i >= maxSteps) { cb(true, ''); return; }
+                    } catch (e) { cb(false, e.message); return; }
+                    i++;
+                    this._schedule(tick, Math.max(200, Number(this.configs.docTaskScrollStepMs) || 800));
+                };
+                this._schedule(tick, 300);
+            },
+            _processDocTasks(docs, idx, done) {
+                if (idx >= docs.length) { done(true, ''); return; }
+                const docTask = docs[idx];
+                if (docTask.finished) { this._processDocTasks(docs, idx + 1, done); return; }
+                let doc = null;
+                try { doc = docTask.frame.contentDocument; } catch (e) { doc = null; }
+                if (!doc) { done(false, '无法访问文档内容'); return; }
+                const scroller = this._docScroller(doc);
+                if (!scroller) { done(false, '未找到文档滚动容器'); return; }
+                console.log('%c[文档任务] 开始翻阅 ' + String(docTask.jobid).slice(0, 24) + '（高度 ' + scroller.scrollHeight + 'px）', 'color:#2196F3');
+                const step = Math.max(200, Math.floor((scroller.clientHeight || 400) * 0.9));
+                this._scrollDocToEnd(scroller, step, Number(this.configs.docTaskMaxSteps) || 60, (ok, msg) => {
+                    if (!ok) { done(false, '翻阅失败：' + msg); return; }
+                    console.log('%c[文档任务] 已滚动到底部，等待平台标记完成…', 'color:#2196F3');
+                    const wait = (left) => {
+                        const still = this._findDocTaskFrames().filter((d) => !d.finished);
+                        if (!still.length) { done(true, ''); return; }
+                        if (left <= 0) { done(false, '滚动后任务点未标记完成'); return; }
+                        this._schedule(() => wait(left - 1), 2000);
+                    };
+                    this._schedule(() => wait(Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 20000) / 2000))), 1000);
+                });
+            },
+            _handleDocTasks() {
+                if (this._docTaskBusy) return true;
+                const docs = this._findDocTaskFrames().filter((d) => !d.finished);
+                if (!docs.length) return false;
+                if (!this.configs.docTaskScroll) {
+                    console.warn('%c[文档任务] 检测到 ' + docs.length + ' 个未完成文档任务点（PDF/PPT/教案）：按当前配置不自动翻阅，已停止自动前进（绝不跳过）。'
+                        + '开启：app.configs.docTaskScroll = true', 'color:#FF9800');
+                    return true;
+                }
+                this._docTaskBusy = true;
+                console.log('%c[文档任务] 检测到 ' + docs.length + ' 个未完成文档任务点，开始自动翻阅…', 'color:#2196F3');
+                this._processDocTasks(docs, 0, (ok, msg) => {
+                    this._docTaskBusy = false;
+                    if (ok) {
+                        console.log('%c[文档任务] 已全部完成，继续推进', 'color:#4CAF50');
+                        this._schedule(() => this.play(), 2000);
+                    } else {
+                        console.warn('%c[文档任务] 自动翻阅未完成：' + msg + '；已停止自动前进，请人工处理', 'color:#FF9800');
+                    }
+                });
                 return true;
             },
             destroy() {
