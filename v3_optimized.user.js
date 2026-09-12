@@ -2414,9 +2414,10 @@
                 return cleaned;
             },
             _llmBuildShortMessages(question) {
+                // 注意：llmJsonMode 下 response_format=json_object 要求提示词必须包含 "json" 字样，否则网关返回 400（真机演练实证）。
                 return [
-                    { role: 'system', content: '你是课程答题助手。请直接给出简洁的参考答案，只输出答案正文，不要解释、不要 Markdown、不要推理过程。' },
-                    { role: 'user', content: '题目：' + String(question || '').slice(0, 500) },
+                    { role: 'system', content: '你是课程答题助手。请直接给出简洁的参考答案，只输出一个 JSON 对象：{"answer":"答案正文"}，不要解释、不要 Markdown、不要推理过程。' },
+                    { role: 'user', content: '题目：' + String(question || '').slice(0, 500) + '\n只输出 JSON，例如 {"answer":"..."}。' },
                 ];
             },
             _llmExtractFreeText(content) {
