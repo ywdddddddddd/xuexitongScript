@@ -70,6 +70,8 @@ llmTimeoutMs: 30000
 llmMaxAnswersPerSession: 50
 llmAutoSubmit: false
 llmChapterTest: false
+llmEmbeddedWork: false
+llmWorkWaitMs: 45000
 ```
 
 关键项说明：
@@ -89,6 +91,8 @@ llmChapterTest: false
 - `llmJsonMode`（默认 **true**）：请求体带 `response_format:{"type":"json_object"}`，约束模型只输出 JSON；自定义端点不支持该参数时设为 `false`。
 - `llmAutoSubmit`（默认 **false**）：半自动档——脚本只替你选定答案，提交/继续按钮留给你点；设为 `true` 才会自动提交。
 - `llmChapterTest`（默认 **false**，实验性）：章节测验页只在面板给出建议答案，**绝不自动点击**；识别失败自动回退「受限跳过」。
+- `llmEmbeddedWork`（默认 **false**，V3.6 新增）：节点内嵌的「章节测验/作业」（work 任务点，如简答题）自动作答：LLM 填写答案后走平台原生提交流程（`btnBlueSubmit` → 确认弹窗 → 任务点标记完成）。**默认关闭时绝不跳过**——检测到未完成内嵌测验会停止自动前进并提示。
+- `llmWorkWaitMs`（默认 45000）：提交后等待任务点标记完成的最长时间；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 ## 使用方法
 

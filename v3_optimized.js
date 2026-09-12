@@ -135,6 +135,9 @@
                 llmAutoSubmit: false,
                 // 章节测验（计入成绩）默认关闭；开启后也只把建议答案显示在面板，绝不自动点击。
                 llmChapterTest: false,
+                // F11（V3.6）：内嵌章节测验/作业（work）自动作答。默认关闭；开启后 LLM 自动填写简答题并走平台原生提交流程。
+                llmEmbeddedWork: false,
+                llmWorkWaitMs: 45000,
             },
             _videoEl: null,
             _treeContainerEl: null,
@@ -178,6 +181,7 @@
             _llmChapterSuggesting: false,
             _llmChapterSuggestDone: false,
             _llmChapterSuggestedCount: 0,
+            _workBusy: false,
             // 思路移植自 PR #48 @CsuCook1e：小节内视频任务点与任务点弹窗状态
             _currentVideoTaskIndex: 0,
             _videoTaskCount: 0,
@@ -591,6 +595,12 @@
                     if (el == null) {
                         if (this._currentStepTitle() === '视频') {
                             throw new Error('视频组件尚未加载完成');
+                        }
+                        // F11（V3.6）：未完成的内嵌章节测验/作业优先处理，绝不跳过
+                        // （修复真机演练发现的「autoAdvanceNoVideo 把章节检验当未知节点跳过」问题）。
+                        if (this._hasUnfinishedEmbeddedWork()) {
+                            this._handleEmbeddedWorks();
+                            return;
                         }
                         if (this._advanceLearningStep()) {
                             console.log('%c当前不在视频页，已尝试切到下一学习步骤，2秒后重试', 'color:#607D8B');
@@ -2296,6 +2306,258 @@
                         this._askChapterTestQuestions(queue, index + 1);
                     }
                 );
+            },
+            // ================= F11（V3.6）：内嵌章节测验/作业（work）自动作答 =================
+            _findUnfinishedWorks() {
+                const found = [];
+                const seen = new Set();
+                const visit = (doc, depth) => {
+                    if (!doc || depth > 6 || seen.has(doc)) return;
+                    seen.add(doc);
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        let jobid = '';
+                        try { jobid = frame.getAttribute ? String(frame.getAttribute('jobid') || '') : ''; } catch (e) { jobid = ''; }
+                        let childDoc = null;
+                        try { childDoc = frame.contentDocument || (frame.contentWindow ? frame.contentWindow.document : null); } catch (e) { childDoc = null; }
+                        if (jobid && jobid.indexOf('work-') === 0) {
+                            let holder = null;
+                            try { holder = frame.closest ? frame.closest('.ans-attach-ct') : null; } catch (e) { holder = null; }
+                            let finished = false;
+                            try { finished = holder ? holder.classList.contains('ans-job-finished') : false; } catch (e) { finished = false; }
+                            let data = {};
+                            try { data = JSON.parse(frame.getAttribute('data') || '{}'); } catch (e) { data = {}; }
+                            found.push({ frame: frame, holder: holder, finished: finished, jobid: jobid, title: data.title || '', worktype: data.worktype || '' });
+                            continue;
+                        }
+                        if (childDoc) visit(childDoc, depth + 1);
+                    }
+                };
+                visit(typeof document === 'undefined' ? null : document, 0);
+                return found;
+            },
+            _hasUnfinishedEmbeddedWork() {
+                try { return this._findUnfinishedWorks().some((w) => !w.finished); } catch (e) { return false; }
+            },
+            _quizDocOf(workFrame) {
+                let doc = null;
+                try { doc = workFrame.contentDocument; } catch (e) { doc = null; }
+                if (!doc) return null;
+                let inner = null;
+                try { inner = doc.querySelector('#frame_content'); } catch (e) { inner = null; }
+                if (inner) {
+                    try {
+                        const d = inner.contentDocument;
+                        if (d && d.querySelector && d.querySelector('.TiMu')) return { doc: d, win: d.defaultView, frame: inner };
+                    } catch (e) { /* ignore */ }
+                }
+                try {
+                    if (doc.querySelector && doc.querySelector('.TiMu')) return { doc: doc, win: doc.defaultView, frame: null };
+                } catch (e) { /* ignore */ }
+                return null;
+            },
+            _workQuestionList(quizDoc) {
+                const win = quizDoc.defaultView;
+                const out = [];
+                let timus = [];
+                try { timus = Array.from(quizDoc.querySelectorAll('.TiMu')); } catch (e) { timus = []; }
+                timus.forEach((timu) => {
+                    let typeLabel = '';
+                    let rawText = '';
+                    try { typeLabel = ((timu.querySelector('.newZy_TItle') || {}).textContent || '').replace(/\s+/g, ''); } catch (e) { typeLabel = ''; }
+                    try { rawText = ((timu.querySelector('.Zy_TItle') || {}).textContent || '').replace(/\s+/g, ' ').trim(); } catch (e) { rawText = ''; }
+                    let textarea = null;
+                    try { textarea = timu.querySelector('textarea[id^="answer"]'); } catch (e) { textarea = null; }
+                    if (!textarea) { try { textarea = quizDoc.querySelector('textarea[id^="answer"]'); } catch (e) { textarea = null; } }
+                    const answerId = textarea ? String(textarea.id).replace(/^answer/, '') : '';
+                    let typeCode = '';
+                    try { typeCode = answerId && win.jQuery ? String(win.jQuery('#answertype' + answerId).val() || '') : ''; } catch (e) { typeCode = ''; }
+                    const isShortAnswer = /简答|论述|分析|写作/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0;
+                    let optionEls = [];
+                    if (!isShortAnswer) {
+                        try { optionEls = Array.from(timu.querySelectorAll('.Zy_ulTop li, .Zy_ulTk li')).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() })); } catch (e) { optionEls = []; }
+                    }
+                    out.push({ typeLabel: typeLabel, typeCode: typeCode, rawText: rawText, answerId: answerId, textarea: textarea, isShortAnswer: isShortAnswer, optionEls: optionEls });
+                });
+                return out;
+            },
+            _workPlainTexts(title, count) {
+                const t = String(title || '').replace(/\s+/g, ' ').trim();
+                if (!t) return [];
+                const parts = [];
+                const re = /(?:^|\s)(\d{1,2})\s*[.、．]\s*/g;
+                let last = -1;
+                let m = null;
+                while ((m = re.exec(t))) {
+                    if (last >= 0) parts.push(t.slice(last, m.index).trim());
+                    last = re.lastIndex;
+                }
+                if (last >= 0) parts.push(t.slice(last).trim());
+                const cleaned = parts.map((s) => s.replace(/[。；;]$/, '')).filter(Boolean);
+                if (cleaned.length >= count) return cleaned.slice(0, count);
+                if (count === 1) return [t];
+                return cleaned;
+            },
+            _llmBuildShortMessages(question) {
+                return [
+                    { role: 'system', content: '你是课程答题助手。请直接给出简洁的参考答案，只输出答案正文，不要解释、不要 Markdown、不要推理过程。' },
+                    { role: 'user', content: '题目：' + String(question || '').slice(0, 500) },
+                ];
+            },
+            _llmExtractFreeText(content) {
+                const raw = String(content == null ? '' : content).trim();
+                if (!raw) return '';
+                const jsonMatch = raw.match(/\{[\s\S]{0,400}\}/);
+                if (jsonMatch) {
+                    try {
+                        const obj = JSON.parse(jsonMatch[0]);
+                        const v = obj && (obj.answer != null ? obj.answer : obj.result);
+                        if (v != null && String(v).trim()) return String(v).trim();
+                    } catch (e) { /* 按纯文本处理 */ }
+                }
+                return raw.replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, '').trim().slice(0, 1200);
+            },
+            _fillWorkAnswer(quizWin, question, text) {
+                const ue = quizWin && quizWin.UE;
+                if (!ue || !ue.instants) return false;
+                const wantKey = 'answer' + question.answerId;
+                let editor = null;
+                for (const key of Object.keys(ue.instants)) {
+                    const candidate = ue.instants[key];
+                    if (candidate && candidate.textarea && String(candidate.textarea.id) === wantKey) { editor = candidate; break; }
+                }
+                if (!editor) editor = ue.instants[wantKey] || null;
+                if (!editor || !editor.body) return false;
+                try {
+                    editor.body.innerHTML = '<p>' + String(text == null ? '' : text).replace(/[<>]/g, '') + '</p>';
+                    if (typeof editor.sync === 'function') editor.sync();
+                    // 关键：页面提交时按 answer<id> 键查找实例，未注册会导致其内部 try/catch 静默失败（真机演练实证）。
+                    if (!ue.instants[wantKey]) ue.instants[wantKey] = editor;
+                    return true;
+                } catch (e) { return false; }
+            },
+            _submitWork(quizWin, topDoc, done) {
+                const clickConfirm = () => {
+                    try {
+                        const all = Array.from(topDoc.querySelectorAll('a, button, span'));
+                        const btn = all.filter((el) => {
+                            const t = (el.innerText || '').trim();
+                            if (t !== '提交') return false;
+                            return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                        })[0];
+                        if (btn) { btn.click(); return true; }
+                    } catch (e) { /* ignore */ }
+                    return false;
+                };
+                const tryClick = (left) => {
+                    if (clickConfirm()) { done(true, ''); return; }
+                    if (left <= 0) { done(false, '未找到确认提交弹窗（可能被风控拦截）'); return; }
+                    this._schedule(() => tryClick(left - 1), 500);
+                };
+                try {
+                    const before = this._findUnfinishedWorks().filter((w) => !w.finished).length;
+                    if (typeof quizWin.btnBlueSubmit === 'function') quizWin.btnBlueSubmit();
+                    else {
+                        const el = quizWin.document.querySelector('.btnSubmit');
+                        if (!el) { done(false, '未找到提交按钮'); return; }
+                        el.click();
+                    }
+                    this._schedule(() => tryClick(20), 900);
+                } catch (e) {
+                    done(false, '提交入口调用失败：' + (e && e.message ? e.message : e));
+                }
+            },
+            _handleEmbeddedWorks() {
+                if (this._workBusy) return true;
+                const works = this._findUnfinishedWorks().filter((w) => !w.finished);
+                if (!works.length) return false;
+                if (!this.configs.llmEnabled || !this.configs.llmEmbeddedWork) {
+                    console.warn('%c[LLM] 检测到 ' + works.length + ' 个未完成的内嵌章节测验/作业：按当前配置不自动作答，已停止自动前进（绝不跳过）。'
+                        + '开启自动作答：app.configs.llmEmbeddedWork = true（需先配置 LLM Key）', 'color:#FF9800');
+                    return true;
+                }
+                if (!this._llmApiKey) {
+                    console.warn('%c[LLM] 检测到未完成的内嵌章节测验，但未配置 API Key：已停止自动前进，请配置后重试', 'color:#FF9800');
+                    return true;
+                }
+                this._workBusy = true;
+                console.log('%c[LLM] 检测到 ' + works.length + ' 个未完成的内嵌章节测验/作业，开始逐题作答（仅简答题会自动填写，提交走平台原生流程）…', 'color:#2196F3');
+                const nextWork = (wi) => {
+                    if (wi >= works.length) {
+                        this._workBusy = false;
+                        console.log('%c[LLM] 内嵌章节测验/作业已全部提交完成，继续推进', 'color:#4CAF50');
+                        this._schedule(() => this.play(), 2500);
+                        return;
+                    }
+                    const work = works[wi];
+                    const quiz = this._quizDocOf(work.frame);
+                    if (!quiz || !quiz.doc) {
+                        this._workBusy = false;
+                        console.warn('%c[LLM] 未能定位测验内容，已停止自动前进（绝不跳过）', 'color:#FF9800');
+                        return;
+                    }
+                    const questions = this._workQuestionList(quiz.doc);
+                    if (!questions.length) {
+                        this._workBusy = false;
+                        console.warn('%c[LLM] 未识别到题目结构，已停止自动前进（绝不跳过）', 'color:#FF9800');
+                        return;
+                    }
+                    const texts = this._workPlainTexts(work.title, questions.length);
+                    console.log('%c[LLM] 作业《' + String(work.title || work.jobid).slice(0, 60) + '》共 ' + questions.length + ' 题', 'color:#2196F3');
+                    const giveUp = (msg) => {
+                        this._workBusy = false;
+                        console.warn('%c[LLM] 内嵌测验自动作答失败：' + msg + '；已停止自动前进，请人工处理', 'color:#FF9800');
+                    };
+                    const askNext = (qi) => {
+                        if (qi >= questions.length) {
+                            this._submitWork(quiz.win, document, (ok, msg) => {
+                                if (!ok) { giveUp(msg); return; }
+                                const waitDone = (left) => {
+                                    const still = this._findUnfinishedWorks().filter((w) => !w.finished);
+                                    if (!still.length) { nextWork(wi + 1); return; }
+                                    if (left <= 0) { giveUp('提交后任务点未标记完成（可能进入人工批阅或需要验证码）'); return; }
+                                    this._schedule(() => waitDone(left - 1), 2000);
+                                };
+                                this._schedule(() => waitDone(Math.max(3, Math.ceil((Number(this.configs.llmWorkWaitMs) || 45000) / 2000))), 800);
+                            });
+                            return;
+                        }
+                        const q = questions[qi];
+                        const questionText = texts[qi] || q.rawText || String(work.title || '');
+                        if (q.isShortAnswer) {
+                            console.log('%c[LLM] 第 ' + (qi + 1) + ' 题（简答）作答中：' + String(questionText).slice(0, 50), 'color:#2196F3');
+                            this._llmRequest(
+                                this._llmBuildPayload(this._llmBuildShortMessages(questionText)),
+                                (content) => {
+                                    const text = this._llmExtractFreeText(content);
+                                    const ok = this._fillWorkAnswer(quiz.win, q, text);
+                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题答案' + (ok ? '已填入编辑器' : '填充失败') + '：' + String(text).slice(0, 60), ok ? 'color:#9C27B0' : 'color:#FF9800');
+                                    if (!ok) { giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
+                                    askNext(qi + 1);
+                                },
+                                (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
+                            );
+                            return;
+                        }
+                        const options = q.optionEls.map((o, i) => ({ el: o.el, text: o.text, letter: String.fromCharCode(65 + i) }));
+                        this._llmRequest(
+                            this._llmBuildPayload(this._llmBuildMessages(questionText, options)),
+                            (content) => {
+                                const answer = this._llmExtractAnswer(content);
+                                const chosen = this._llmPickOption(options, answer);
+                                if (!chosen) { giveUp('第 ' + (qi + 1) + ' 题无法匹配选项（选项可能被字体混淆）'); return; }
+                                try { chosen.el.click(); } catch (e) { /* ignore */ }
+                                console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + String(chosen.text || '').slice(0, 40), 'color:#9C27B0');
+                                askNext(qi + 1);
+                            },
+                            (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
+                        );
+                    };
+                    askNext(0);
+                };
+                nextWork(0);
+                return true;
             },
             destroy() {
                 this._isPlaying = false;

@@ -908,6 +908,17 @@ test('F4-8 注册点幂等且 destroy() 可完全注销（行为 + 静态审计�
 // F9 GUI 面板 / F10 章节测验建议（V3.5）
 // ---------------------------------------------------------------------------
 
+test('F11-1 未完成的内嵌章节测验：默认不跳过、不自动前进（真机演练问题回归）', async () => {
+    const workHtml = '<div class="ans-attach-ct"><div class="ans-job-icon" aria-label="任务点未完成"></div>'
+        + '<iframe jobid="work-test123" data="{&quot;workid&quot;:&quot;test123&quot;,&quot;title&quot;:&quot;测试作业 1. 第一题  2. 第二题&quot;,&quot;worktype&quot;:&quot;workA&quot;}"></iframe></div>';
+    const html = tree(chapterSpecs(['1.1'], ['2.1'])) + '<div class="prev_title" title="二、版画的特性"></div>' + workHtml;
+    const env = createEnv({ html });
+    const app = await env.boot();
+    await env.advance(20000);
+    check('F11-1 检测到未完成的内嵌章节测验', env.xt.has('未完成的内嵌章节测验'), '');
+    check('F11-1 不自动前进（树节点零点击）', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
+    check('F11-1 不走 autoAdvance 跳过路径', !env.xt.has('按配置有界前进'), '');
+});
 test('F9-1 GUI 面板：默认注入、状态可见、destroy 后移除、可配置关闭', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
     const app = await env.boot();
@@ -988,6 +999,7 @@ test('F5-2 LLM 能力仅在显式开关后存在：默认关闭、无硬编码�
     const code = stripComments(readFileSync(sourcePath, 'utf8'));
     check('F5-2 默认 llmEnabled=false 且 llmChapterTest=false', /llmEnabled:\s*false/.test(code) && /llmChapterTest:\s*false/.test(code), '');
     check('F5-2 默认 guiEnabled=true（纯本地面板）', /guiEnabled:\s*true/.test(code), '');
+    check('F5-2 默认 llmEmbeddedWork=false（内嵌章节测验默认不自动作答）', /llmEmbeddedWork:\s*false/.test(code), '');
     check('F5-2 无 autoAnswer 命名', !/autoAnswer/i.test(code), '');
     check('F5-2 无 fetch() 直连', !/\bfetch\s*\(/.test(code), '');
     check('F5-2 无 XMLHttpRequest / axios 直连', !/XMLHttpRequest|axios/.test(code), '');
