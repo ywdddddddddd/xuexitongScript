@@ -1182,26 +1182,251 @@ await test('I2 防御验证：轮询 tick 与 ended 事件双触发时，_handli
   await close(env);
 });
 
-await test('I3 证伪：ended 后 1s 内的跳转定时器不可取消 → 用户/页面已前进仍再跳一节', async ({ note }) => {
+await test('I3 回归验证（原 V1）：视频结束的自动跳转定时器已登记、可被取消、不再多跳一节', async ({ note }) => {
   const env = createEnv({ html: pageHTML(threeLeafTree(), '<div class="prev_title" title="视频">视频</div>') });
   const video = makeVideo(env, env.window.document);
   const app = await boot(env);
   video.__state.ended = true;
-  video.dispatchEvent(new env.window.Event('ended'));         // 排定 1000ms 后自动跳转
+  video.dispatchEvent(new env.window.Event('ended'));
   assertEq(env.activeTimeouts(1000).length, 1, 'I3: 未排定自动跳转定时器');
-  assertEq(app._delayedNextUnitTimer, null, 'I3: 自动跳转定时器未被登记（无法被 play() 取消）');
-  app.nextUnit(); await sleep(20);                            // 用户在 1s 内已经手动进入下一节
+  assert(app._delayedNextUnitTimer !== null && app._delayedNextUnitTimer !== undefined, 'I3: 自动跳转定时器未登记到 _delayedNextUnitTimer（V1 复现）');
+  app.nextUnit();
+  await sleep(20);
   assertEq(env.navTitles(), ['1.2'], 'I3: 手动前进失败');
-  video.dispatchEvent(new env.window.Event('play'));          // 新小节开始播放：本应取消待执行跳转
-  assertEq(app._delayedNextUnitTimer, null, 'I3: _handleVideoPlay 未能识别待取消的定时器');
+  assertEq(app._delayedNextUnitTimer, null, 'I3: nextUnit 入口未取消陈旧定时器');
+  video.dispatchEvent(new env.window.Event('play'));
+  await sleep(1300);
+  assertEq(env.navTitles(), ['1.2'], 'I3: 陈旧定时器仍然多跳了一节（V1 回归）');
+  assertEq(env.activeTimeouts(1000).length, 0, 'I3: 仍有待执行的自动跳转定时器');
+  assertEq(app._handlingVideoEnd, false, 'I3: 结束去重标志未复位');
+  // playCurrentIndex 会解绑旧视频事件；先重新 play() 让 ended 监听重新绑定，再验「取消后仍能正常跳转」
+  await app.play();
+  await sleep(20);
+  video.__state.ended = true;
+  video.dispatchEvent(new env.window.Event('ended'));
+  assert(app._delayedNextUnitTimer !== null && app._delayedNextUnitTimer !== undefined, 'I3: 取消后下一次结束未再排定跳转（去重标志卡死）');
   await sleep(1200);
-  assertEq(env.navTitles(), ['1.2', '1.3'], 'I3: 陈旧定时器未再跳一节（未复现）');
-  recordFinding('V1', 'medium',
-    '视频结束后排定的 1s 自动跳转定时器没有登记到 _delayedNextUnitTimer，无法被 _handleVideoPlay/nextUnit 取消；用户在 1s 窗口内（或页面自身）前进后，陈旧定时器会再跳一节，跳过刚进入的小节',
-    '在 _handleVideoEnded 中用 this._delayedNextUnitTimer = this._schedule(...) 登记自动跳转定时器，并在 _handleVideoPlay / playCurrentIndex / _handleLoadedMetadata 与 nextUnit 入口处 _cancelTimer 取消待执行跳转',
-    'I3 复现：playCurrentIndex/nextUnit 已到 1.2、并按 _handleVideoPlay 语义尝试取消后，1.2s 时出现第二次「准备切换到下一小节」并点击 1.3');
-  note(`ended 后 _delayedNextUnitTimer=null（定时器未被登记）→ 手动前进到 1.2 后 1.2s，又自动跳到 1.3`);
+  assertEq(env.navTitles(), ['1.2', '1.3'], 'I3: 下一次结束应正常跳到 1.3');
+  note('ended 后定时器已登记并被 nextUnit 取消：手动到 1.2 后 1.2s 未再跳；再次 ended 仍能正常跳到 1.3（去重标志已复位）');
   await close(env);
+});
+
+// ===========================================================================
+// J. 新增交互面抽查（PR #48 移植代码会主动点击页面按钮，必须验证范围与上限）
+// ===========================================================================
+group('J. 新增交互面抽查（任务点弹窗自动点击）');
+
+await test('J1 「任务点未完成」弹窗：只点「去学习/去完成」，绝不点「下一节」，且受每小节上限约束', async ({ note }) => {
+  const env = createEnv({ html: pageHTML(threeLeafTree()) });
+  const doc = env.window.document;
+  const dialog = doc.createElement('div');
+  dialog.className = 'layui-layer';
+  dialog.innerHTML = '<div class="layui-layer-title">提示</div><div>当前章节还有任务点未完成</div>'
+    + '<button id="goLearn">去学习</button><button id="goNext">下一节</button>';
+  doc.body.appendChild(dialog);
+  const app = await boot(env);
+  app._taskDialogClicksThisUnit = 0;
+  app._taskDialogCapLogged = false;
+  const before = env.clicks.length;
+  let handled = 0;
+  for (let i = 0; i < 10; i++) {
+    app._lastTaskPointDialogClickAt = 0; // 跳过 8s 冷却，单独验证「每小节次数上限」
+    if (app._handleTaskPointDialog('verifier-' + i)) handled++;
+  }
+  const clicks = env.clicks.slice(before);
+  const goLearn = clicks.filter((c) => c.text.includes('去学习')).length;
+  const goNext = clicks.filter((c) => c.text.includes('下一节')).length;
+  assert(handled >= 1, 'J1: 未识别到「任务点未完成」弹窗');
+  assertEq(goNext, 0, 'J1: 点击了「下一节」（契约要求点「去学习/去完成」回到未完成任务点）');
+  assertEq(goLearn, app.configs.taskDialogMaxClicksPerUnit, 'J1: 「去学习」点击次数应等于每小节上限 ' + app.configs.taskDialogMaxClicksPerUnit);
+  assert(env.has('停止点击以免循环'), 'J1: 缺少触顶提示日志');
+  note('识别到弹窗后「去学习」点击 ' + goLearn + ' 次（上限=' + app.configs.taskDialogMaxClicksPerUnit + '）、「下一节」点击 ' + goNext + ' 次；触顶提示命中');
+  await close(env);
+});
+
+// ===========================================================================
+// K. PR #48 移植面专项（任务点弹窗 / 任务点下标 / 任务类型优先级 / 递归上限）
+// ===========================================================================
+group('K. PR #48 移植面专项（任务点弹窗 / 任务点下标 / 任务类型 / 递归上限）');
+
+await test('K1 「任务点未完成」弹窗：原生 confirm 零调用、冷却生效、只点「去学习/去完成」；假弹窗不误吞', async ({ note }) => {
+  const env = createEnv({ html: pageHTML(threeLeafTree()) });
+  const doc = env.window.document;
+  let confirmCalls = 0;
+  env.window.confirm = function () { confirmCalls++; return true; };
+  const decoy = doc.createElement('div');
+  decoy.className = 'layui-layer';
+  decoy.innerHTML = '<div>当前小节还有任务点未完成</div><button id="decoyNext">下一节</button>';
+  doc.body.appendChild(decoy);
+  const app = await boot(env);
+  const beforeDecoy = env.clicks.length;
+  const decoyHandled = app._handleTaskPointDialog('decoy-probe');
+  assertEq(decoyHandled, false, 'K1: 假弹窗（文案相近但不是任务点弹窗）被误判');
+  assertEq(env.clicks.length, beforeDecoy, 'K1: 假弹窗场景发生了点击');
+  const dialog = doc.createElement('div');
+  dialog.className = 'layui-layer';
+  dialog.innerHTML = '<div>当前章节还有任务点未完成</div><button id="goLearn">去学习</button><button id="goFinish">去完成</button><button id="goNext">下一节</button>';
+  doc.body.appendChild(dialog);
+  app._taskDialogClicksThisUnit = 0;
+  app._taskDialogCapLogged = false;
+  app._lastTaskPointDialogClickAt = 0;
+  const before = env.clicks.length;
+  const first = app._handleTaskPointDialog('k1-first');
+  const second = app._handleTaskPointDialog('k1-cooldown');
+  const afterCooldown = env.clicks.length - before;
+  assertEq(first, true, 'K1: 真实弹窗未被识别');
+  assertEq(second, false, 'K1: 冷却期内仍然点击');
+  assertEq(afterCooldown, 1, 'K1: 冷却期内点击次数应为 1，实际 ' + afterCooldown);
+  for (let i = 0; i < 10; i++) { app._lastTaskPointDialogClickAt = 0; app._handleTaskPointDialog('k1-cap-' + i); }
+  const clicks = env.clicks.slice(before);
+  const goTarget = clicks.filter((c) => c.text.includes('去学习') || c.text.includes('去完成')).length;
+  const goNext = clicks.filter((c) => c.text.includes('下一节')).length;
+  assertEq(goNext, 0, 'K1: 点击了「下一节」（契约要求点「去学习/去完成」）');
+  assertEq(goTarget, app.configs.taskDialogMaxClicksPerUnit, 'K1: 目标按钮点击次数应等于上限 ' + app.configs.taskDialogMaxClicksPerUnit);
+  assertEq(confirmCalls, 0, 'K1: 调用了原生 confirm（不应自动确认平台弹窗）');
+  assert(env.has('停止点击以免循环'), 'K1: 缺少触顶提示');
+  note('假弹窗返回 false 且零点击；真实弹窗冷却期内仅 1 次点击；总计「去学习/去完成」' + goTarget + ' 次（上限=' + app.configs.taskDialogMaxClicksPerUnit + '）、「下一节」' + goNext + ' 次、原生 confirm ' + confirmCalls + ' 次');
+  await close(env);
+});
+
+await test('K2 _getNextPendingVideoTaskIndex：跳过已完成、不回头重播、全完成返回 -1', async ({ note }) => {
+  const env = createEnv({ html: pageHTML(threeLeafTree()) });
+  const doc = env.window.document;
+  const wrap = doc.createElement('div');
+  doc.body.appendChild(wrap);
+  const makeTask = (id, cls) => {
+    const cell = doc.createElement('div');
+    wrap.appendChild(cell);
+    const f = doc.createElement('iframe');
+    f.id = id;
+    if (cls) f.className = cls;
+    cell.appendChild(f);
+    return f;
+  };
+  const A = makeTask('taskA', 'ans-job-finished');
+  const B = makeTask('taskB', 'ans-job-finished');
+  const C = makeTask('taskC', '');
+  const D = makeTask('taskD', '');
+  const app = await boot(env);
+  const frames = [A, B, C, D];
+  assertEq(app._isVideoTaskFrameComplete(A), true, 'K2: A 应被判为已完成');
+  assertEq(app._isVideoTaskFrameComplete(C), false, 'K2: C 应被判为未完成');
+  assertEq(app._areAllVideoTasksComplete(frames), false, 'K2: 存在未完成任务点时应为 false');
+  assertEq(app._getNextPendingVideoTaskIndex(frames, 0), 2, 'K2: 从 0 起应跳过已完成的 A/B 落到 C');
+  assertEq(app._getNextPendingVideoTaskIndex(frames, 2), 2, 'K2: from=2 应返回 2');
+  assertEq(app._getNextPendingVideoTaskIndex(frames, 3), 3, 'K2: from=3 应返回 3');
+  assertEq(app._getNextPendingVideoTaskIndex([A, B], 0), -1, 'K2: 全完成应返回 -1');
+  assertEq(app._areAllVideoTasksComplete([A, B]), true, 'K2: 全完成应为 true');
+  assertEq(app._areAllVideoTasksComplete([]), false, 'K2: 空集合应为 false');
+  note('A/B 已完成、C/D 未完成：from=0→2、from=2→2、from=3→3、[A,B] 全完成→-1（不回退重播）');
+  await close(env);
+});
+
+await test('K3 任务点全完成 → 交回无视频分支且有界前进，触顶后不再前进（无死循环）', async ({ note }) => {
+  const html = pageHTML(treeHTML([
+    { title: '第1章', nodes: [{ title: '1.1', active: true }, { title: '1.2' }, { title: '1.3' }] },
+    { title: '第2章', nodes: [{ title: '2.1' }, { title: '2.2' }] },
+  ]), '<iframe class="ans-insertvideo-online ans-job-finished" id="taskVideo"></iframe>');
+  const env = createEnv({ html });
+  const app = await boot(env);
+  assert(app._getVideoEl() === null, 'K3: 全完成后应返回 null 交给无视频分支');
+  assertEq(app._videoTaskCount, 1, 'K3: 应识别到 1 个视频任务点');
+  assertEq(app._videoTaskAllComplete, true, 'K3: 应标记任务点全部完成');
+  assert(env.has('视频任务点均已完成，准备切换下一小节'), 'K3: 缺少任务点完成日志');
+  assert(env.navTitles().length >= 1, 'K3: boot 后应已按任务点完成自动前进至少一次');
+  for (let i = 0; i < 8; i++) { await app.play(); await sleep(20); }
+  assertEq(env.navTitles(), ['1.2', '1.3', '2.1'], 'K3: 有界前进序列不符');
+  assertEq(app._consecutiveNoVideoAdvances, 3, 'K3: 计数应停在上限 3');
+  assert(env.has('连续自动前进已达上限'), 'K3: 缺少触顶日志');
+  const atCap = env.navTitles().length;
+  for (let i = 0; i < 5; i++) { await app.play(); await sleep(15); }
+  assertEq(env.navTitles().length, atCap, 'K3: 触顶后仍在前进（疑似死循环）');
+  note('任务点全完成 → _getVideoEl()=null 且标记 _videoTaskAllComplete=true；有界前进 ' + JSON.stringify(env.navTitles()) + '，上限 ' + app.configs.maxConsecutiveNoVideoAdvances + ' 次后点击数不再增长');
+  await close(env);
+});
+
+await test('K4 任务类型判定：视频信号优先于阅读标签；无视频时按 reading/quiz/unknown 分类', async ({ note }) => {
+  const envA = createEnv({ html: pageHTML(threeLeafTree(), '<div class="prev_title" title="阅读">阅读</div>') });
+  makeVideo(envA, envA.window.document);
+  const appA = await boot(envA);
+  const signalA = appA._hasVideoTaskSignal();
+  const kindA = appA._getTaskKind();
+  assertEq(signalA, true, 'K4: 视频信号未被识别');
+  assertEq(kindA, 'video', 'K4: 阅读标签 + 视频任务时应按视频处理（优先级错误）');
+  await close(envA);
+  const envB = createEnv({ html: pageHTML(threeLeafTree(), '<div class="prev_title" title="阅读">阅读</div>') });
+  const appB = await boot(envB);
+  const signalB = appB._hasVideoTaskSignal();
+  const kindB = appB._getTaskKind();
+  assertEq(signalB, false, 'K4: 无视频时不应有视频信号');
+  assertEq(kindB, 'reading', 'K4: 仅阅读标签时应为 reading');
+  await close(envB);
+  const envC = createEnv({ html: pageHTML(threeLeafTree(), '<div class="prev_title" title="章节测验">章节测验</div>') });
+  const appC = await boot(envC);
+  const kindC = appC._getTaskKind();
+  assertEq(kindC, 'quiz', 'K4: 章节测验应为 quiz');
+  await close(envC);
+  const envD = createEnv({ html: pageHTML(threeLeafTree()) });
+  const appD = await boot(envD);
+  const kindD = appD._getTaskKind();
+  assertEq(kindD, 'unknown', 'K4: 无信号时应为 unknown');
+  await close(envD);
+  note('A(阅读标签+video)=' + kindA + '；B(仅阅读)=' + kindB + '；C(章节测验)=' + kindC + '；D(无信号)=' + kindD);
+});
+
+await test('K6 披露核查：t6 的 document 守卫只在窗口已销毁时生效，活跃页面语义不变', async ({ note }) => {
+  const env = createEnv({ html: pageHTML(threeLeafTree(), '<div class="prev_title" title="章节测验">章节测验</div>') });
+  const app = await boot(env);
+  const activeTitle = app._currentStepTitle();
+  const activeText = app._currentTaskText();
+  assertEq(activeTitle, '章节测验', 'K6: 活跃页面上 _currentStepTitle 被守卫影响（语义变化）');
+  assert(activeText.indexOf('章节测验') >= 0, 'K6: 活跃页面上 _currentTaskText 未包含页面文本');
+  app.destroy();
+  env.dom.window.close();
+  await sleep(5);
+  let afterTitle = null;
+  let afterThrew = null;
+  try { afterTitle = app._currentStepTitle(); } catch (e) { afterThrew = String(e && e.message); }
+  assertEq(afterThrew, null, 'K6: 窗口销毁后 _currentStepTitle 仍抛异常（守卫未生效）');
+  assertEq(afterTitle, '', 'K6: 窗口销毁后 _currentStepTitle 应返回空串');
+  let afterText = null;
+  try { afterText = app._currentTaskText(); } catch (e) { afterThrew = String(e && e.message); }
+  assertEq(afterThrew, null, 'K6: 窗口销毁后 _currentTaskText 仍抛异常');
+  assertEq(afterText, '', 'K6: 窗口销毁后 _currentTaskText 应返回空串');
+  note('活跃页面：_currentStepTitle="' + activeTitle + '"、_currentTaskText 含页面文本（守卫零影响）；window.close() 之后：两个方法均返回空串而非抛 TypeError（防御性 no-op，已钉扎）');
+  await close(env);
+});
+
+await test('K5 _findInteractionDialog：递归深度有上限、深层弹窗不误判、扇出不卡死', async ({ note }) => {
+  const envDeep = createEnv({ html: pageHTML(threeLeafTree()) });
+  let d = envDeep.window.document;
+  for (let i = 0; i < 6; i++) { const f = makeFrame(envDeep, d, 'deep' + i); d = f.contentDocument; }
+  makeDialog(d);
+  const appDeep = await boot(envDeep);
+  const t0 = Date.now();
+  const deepFound = appDeep._findInteractionDialog(envDeep.window.document, 0);
+  const deepMs = Date.now() - t0;
+  assertEq(deepFound, null, 'K5: 超过深度上限的弹窗仍被递归检出（无上限保护）');
+  assert(deepMs < 2000, 'K5: 深层扫描耗时异常 ' + deepMs + 'ms');
+  assertEq(appDeep._checkInteractionDialog(), null, 'K5: 深层弹窗不应被当作互动弹窗');
+  assertEq(appDeep._interactionBlocked, false, 'K5: 深层弹窗误触发暂停');
+  await close(envDeep);
+  const envShallow = createEnv({ html: pageHTML(threeLeafTree()) });
+  const f1 = makeFrame(envShallow, envShallow.window.document, 's1');
+  const f2 = makeFrame(envShallow, f1.contentDocument, 's2');
+  makeDialog(f2.contentDocument);
+  const appShallow = await boot(envShallow);
+  assert(appShallow._findInteractionDialog(envShallow.window.document, 0), 'K5: 2 层内的弹窗未被检出');
+  await close(envShallow);
+  const envFan = createEnv({ html: pageHTML(threeLeafTree()) });
+  for (let i = 0; i < 20; i++) makeFrame(envFan, envFan.window.document, 'fan' + i);
+  const appFan = await boot(envFan);
+  const t1 = Date.now();
+  assertEq(appFan._findInteractionDialog(envFan.window.document, 0), null, 'K5: 无弹窗时应返回 null');
+  const fanMs = Date.now() - t1;
+  assert(fanMs < 2000, 'K5: 扇出扫描耗时异常 ' + fanMs + 'ms');
+  await close(envFan);
+  note('6 层嵌套（上限 ' + appDeep.configs.videoFrameMaxDepth + '）→ null，耗时 ' + deepMs + 'ms；2 层内弹窗正常检出；20 路 iframe 扇出 ' + fanMs + 'ms 无卡死');
 });
 
 // ===========================================================================

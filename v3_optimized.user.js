@@ -212,6 +212,8 @@
                     console.warn('%c检测到视频互动答题弹窗，已暂停自动跳转（#29 #39）。请手动完成题目，脚本会在弹窗消失后自动继续。', 'color:#FF9800');
                     return;
                 }
+                // t6：进入 nextUnit 前先取消任何待执行的「视频结束自动跳转」，避免旧定时器把刚打开的小节又跳一次。
+                this._cancelDelayedNextUnit('进入 nextUnit');
                 if (this._nextUnitPending) {
                     console.warn('%c已有小节切换正在进行，忽略重复请求', 'color:#FF9800');
                     return;
@@ -285,6 +287,24 @@
                 }, ms);
                 this._timers.add(id);
                 return id;
+            },
+            _cancelDelayedNextUnit(reason) {
+                // t6 修复（verifier finding V1）：视频结束后用于自动跳转的定时器必须像其它延时器一样
+                // 登记到 `_delayedNextUnitTimer` 账本，否则 _handleVideoPlay / playCurrentIndex /
+                // _handleVideoLoaded / nextUnit 入口的取消对它完全无效——陈旧定时器会在 1.2 秒后把
+                // 用户刚打开的小节瞬间跳过（对应 #9 #24 #27 #37 #50）。
+                // 同时复位 _handlingVideoEnd：定时器被取消后没人再执行「先复位再跳转」的回调，
+                // 不在这里复位会让去重标志永久为 true，之后所有视频结束都不再触发跳转。
+                if (!this._delayedNextUnitTimer) return false;
+                this._cancelTimer(this._delayedNextUnitTimer);
+                this._delayedNextUnitTimer = null;
+                if (this._handlingVideoEnd) {
+                    this._handlingVideoEnd = false;
+                    console.log(`%c已取消待执行的自动跳转并复位结束去重标志（${reason}）`, 'color:#607D8B');
+                } else {
+                    console.log(`%c已取消待执行的自动跳转（${reason}）`, 'color:#607D8B');
+                }
+                return true;
             },
             _cancelTimer(id) {
                 if (!id) return;
@@ -885,6 +905,7 @@
             },
             _currentTaskText() {
                 // 思路移植自 PR #48 @CsuCook1e（_getCurrentTaskText）
+                if (typeof document === 'undefined') return ''; // t6：页面已关闭时保持可用，不抛异常
                 const parts = [document.title, this._currentStepTitle()];
                 try {
                     const selectors = '.posCatalog_active .posCatalog_name, .prev_white.active, .prev_white.selected, .prev_white[aria-selected="true"]';
@@ -1069,6 +1090,7 @@
                 return false;
             },
             _currentStepTitle() {
+                if (typeof document === 'undefined') return ''; // t6：页面已关闭时保持可用，不抛异常
                 const prevTitle = document.getElementsByClassName('prev_title')[0];
                 return prevTitle ? (prevTitle.title || prevTitle.textContent || '').trim() : '';
             },
@@ -1143,16 +1165,10 @@
                     console.log('%c静音播放成功', 'color:#4CAF50');
                     this._tryTimes = 0;
                     this._startVideoMonitoring();
-                    if (this._delayedNextUnitTimer) {
-                        this._cancelTimer(this._delayedNextUnitTimer);
-                        this._delayedNextUnitTimer = null;
-                    }
+                    this._cancelDelayedNextUnit('静音恢复成功');
                 }).catch((e) => {
                     console.error('静音播放也失败:', e);
-                    if (this._delayedNextUnitTimer) {
-                        this._cancelTimer(this._delayedNextUnitTimer);
-                        this._delayedNextUnitTimer = null;
-                    }
+                    this._cancelDelayedNextUnit('静音恢复失败');
                     this._isPlaying = false;
                     if (this._tryTimes >= this.configs.maxRetries) {
                         console.error('%c静音播放失败，已达到最大重试次数', 'color:#F44336;font-weight:bold', e);
@@ -1205,6 +1221,8 @@
                 console.log(`%c点击切换到: ${$(clickableSpan).attr('title') || '未知标题'}`, 'color:#2196F3');
                 // F6（#52 #55）：切换小节时显式失效视频缓存并解绑旧事件。
                 this._invalidateVideoCache('切换小节');
+                // t6：切小节时取消可能残留的上一段视频的自动跳转定时器（并复位结束去重标志）。
+                this._cancelDelayedNextUnit('切换小节');
                 this._isPlaying = false;
                 this._currentVideoTaskIndex = 0;
                 this._videoTaskCount = 0;
@@ -1450,13 +1468,17 @@
                     console.warn('检查小节内视频任务点失败:', error);
                 }
 
-                this._schedule(() => {
+                // t6：登记到统一定时器账本，使四处入口的取消对它生效（原先这里未登记，取消形同虚设）。
+                this._delayedNextUnitTimer = this._schedule(() => {
+                    this._delayedNextUnitTimer = null;
                     this._handlingVideoEnd = false;
                     this.nextUnit();
                 }, 1000);
             },
             _handleVideoLoaded(e) {
                 console.log('%c============视频加载完成=============', 'color:#2196F3');
+                // t6：新视频已加载完成，取消可能残留的「上一段视频结束」自动跳转，避免跳过当前小节。
+                this._cancelDelayedNextUnit('视频加载完成');
                 if (this.configs.autoplay && !this._isPlaying) {
                     this.play();
                 }
@@ -1470,10 +1492,7 @@
                 this._userPaused = false;
                 this._guardLastTime = Number((this._getVideoEl() || {}).currentTime || 0);
                 this._guardLastWallTs = Date.now();
-                if (this._delayedNextUnitTimer) {
-                    this._cancelTimer(this._delayedNextUnitTimer);
-                    this._delayedNextUnitTimer = null;
-                }
+                this._cancelDelayedNextUnit('视频重新开始播放');
             },
             _handleVideoPause(e) {
                 const now = Date.now();
