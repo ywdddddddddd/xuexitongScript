@@ -421,11 +421,13 @@
                     } catch (e) { /* ignore */ }
                 };
                 document.addEventListener('visibilitychange', this._visibilityHandler);
+                window.addEventListener('focus', this._visibilityHandler);
             },
             _unbindVisibilityRecovery() {
                 if (!this._visibilityBound) return;
                 this._visibilityBound = false;
                 try { document.removeEventListener('visibilitychange', this._visibilityHandler); } catch (e) { /* ignore */ }
+                try { window.removeEventListener('focus', this._visibilityHandler); } catch (e) { /* ignore */ }
                 this._visibilityHandler = null;
             },
             _startVideoMonitoring() {
@@ -613,6 +615,15 @@
                     } else if (!video.paused && Math.abs(current - this._guardLastTime) >= 0.01) {
                         this._guardLastWallTs = now;
                         this._guardLastTime = current;
+                        if (!this._progressStreakStart) this._progressStreakStart = now;
+                        // F14b（V3.6）：持续播放 60 秒即返还保活预算 —— 平台/浏览器造成的瞬时暂停
+                        // 不再逐次累积消耗「每小节 5 次」上限（真机演练：两次抖动即耗尽预算导致停滞）。
+                        if (now - this._progressStreakStart > 60000 && (this._resumeAttemptsThisUnit > 0 || this._resumeCapLogged)) {
+                            this._resumeAttemptsThisUnit = 0;
+                            this._resumeCapLogged = false;
+                            this._progressStreakStart = now;
+                            console.log('%c视频持续播放 60 秒：重置保活预算', 'color:#4CAF50');
+                        }
                     }
 
                     // F12（V3.6）：片尾停滞保护 —— 平台会在片尾主动暂停（恢复次数耗尽后假死）。已播放 ≥ videoCompleteRatio
@@ -630,9 +641,14 @@
                         } catch (e) { /* 保底：不阻塞主流程 */ }
                     }
                     if (video.paused && this._isPlaying) {
+                        this._progressStreakStart = 0;
                         if (this._isProgressStalled(now)) {
-                            console.log('%c检测到视频暂停且进度停滞，按有界策略尝试恢复播放...', 'color:#FF5722');
-                            this._tryResumePlayback('paused');
+                            const cap = Math.max(1, Number(this.configs.resumeMaxAttemptsPerUnit) || 5);
+                            if (this._resumeAttemptsThisUnit < cap) {
+                                console.log('%c检测到视频暂停且进度停滞，按有界策略尝试恢复播放...', 'color:#FF5722');
+                                this._tryResumePlayback('paused');
+                            }
+                            // 达到上限后不再每秒重复打印（上限提示已由 _tryResumePlayback 打印一次）
                         }
                     } else if (this._isPlaying && !video.ended) {
                         if (now - this._guardLastWallTs >= this.configs.guardNoProgressMs && this._isProgressStalled(now)) {
@@ -661,6 +677,7 @@
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
+            _progressStreakStart: 0,
             _guardProbeTimer: null,
             _seekBackTimesThisUnit: 0,
             _seekBackCapLogged: false,
