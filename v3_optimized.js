@@ -236,6 +236,7 @@
                 this._tryTimes = 0;
                 this._emptyContentStreak = 0;
                 this._videoRefreshTried = false;
+                this._unitCompletionRatio = null;
                 this._currentVideoTaskIndex = 0;
                 this._videoTaskCount = 0;
                 this._videoTaskAllComplete = false;
@@ -652,15 +653,26 @@
                         }
                     }
 
-                    // F12（V3.6）：片尾停滞保护 —— 平台会在片尾主动暂停（恢复次数耗尽后假死）。已播放 ≥ videoCompleteRatio
+                    // F12（V3.6）：片尾停滞保护 —— 平台会在片尾主动暂停（恢复次数耗尽后假死）。已播放 ≥ 完成条件比例
                     // 且平台已完成标记时，视同片尾完成直接推进（真机演练：4、宋 元 卡在 255/261，平台已 complete=true）。
+                    // F23（V3.6 补丁）：比例优先取页面「完成条件」文案（如「观看时长需 ≥ 总时长的 90%」）；
+                    // 多任务点小节里「当前任务点已被平台标记完成 + 达到比例」时提前切下一个任务点，不再白播片尾
+                    // （真机实测：984s 视频 92.0% 即被标记，等 ended 要白等约 79s）。
                     if (this._isPlaying && !video.ended) {
                         try {
-                            const ratio = Number(this.configs.videoCompleteRatio) || 0.9;
+                            const ratio = this._getUnitCompletionRatio ? this._getUnitCompletionRatio() : (Number(this.configs.videoCompleteRatio) || 0.9);
                             const frames = this._getVideoTaskFrames ? this._getVideoTaskFrames() : [];
+                            const reachedRatio = video.duration > 0 && current / video.duration >= ratio;
                             const platformDone = frames.length > 0 && this._areAllVideoTasksComplete ? this._areAllVideoTasksComplete(frames) : false;
-                            if (platformDone && video.duration > 0 && current / video.duration >= ratio) {
+                            if (reachedRatio && platformDone) {
                                 console.log('%c视频已播放 ≥ ' + Math.round(ratio * 100) + '% 且平台已标记任务点完成，按片尾完成处理并推进', 'color:#4CAF50');
+                                this._handleVideoEnded();
+                                return;
+                            }
+                            const currentFrame = frames[this._currentVideoTaskIndex];
+                            const currentDone = !!(frames.length > 1 && currentFrame && this._isVideoTaskFrameComplete && this._isVideoTaskFrameComplete(currentFrame));
+                            if (reachedRatio && currentDone && !platformDone) {
+                                console.log('%c当前视频任务点已完成且达到完成条件 ' + Math.round(ratio * 100) + '%，跳过片尾切换下一个任务点', 'color:#4CAF50');
                                 this._handleVideoEnded();
                                 return;
                             }
@@ -700,6 +712,8 @@
             _emptyContentStreak: 0,
             // F22（V3.6 补丁）：play() 超时后「强制失效缓存并重新定位」是否已用过（播放成功/切换小节/run 后重置）。
             _videoRefreshTried: false,
+            // F23（V3.6 补丁）：本小节「完成条件」文案解析出的比例（如 90% → 0.9）；null=未解析到，按配置回退。
+            _unitCompletionRatio: null,
             _stepAdvanceTimes: 0,
             _stepSwitchAt: 0,
             _stepSwitchPending: false,
@@ -1127,6 +1141,41 @@
             _areAllVideoTasksComplete(frames) {
                 // 思路移植自 PR #48 @CsuCook1e（_areAllVideoTasksComplete）
                 return frames.length > 0 && this._getNextPendingVideoTaskIndex(frames, 0) === -1;
+            },
+            _getUnitCompletionRatio() {
+                // F23（V3.6 补丁）：解析内容帧里的「完成条件」文案，例如
+                //   「完成条件 观看时长需 ≥ 总时长的 90% (未完成任务点前, 当前视频不可拖拽)」
+                // 返回 0<ratio<=1；解析不到时退回 configs.videoCompleteRatio（默认 0.9）。
+                // 只缓存「解析到的」比例（可能比首次监控 tick 晚出现），未解析到时每次回退配置值。
+                const fallback = Number(this.configs.videoCompleteRatio) || 0.9;
+                if (this._unitCompletionRatio != null) return this._unitCompletionRatio;
+                let ratio = null;
+                const scan = (doc, depth) => {
+                    if (ratio != null || !doc || depth > 4) return;
+                    let text = '';
+                    try {
+                        const body = doc.body;
+                        if (body) text = String(body.innerText || body.textContent || '');
+                    } catch (e) { text = ''; }
+                    if (text && text.indexOf('完成条件') >= 0) {
+                        const m = text.match(/完成条件[\s\S]{0,140}?(\d{1,3}(?:\.\d+)?)\s*%/);
+                        if (m) {
+                            const pct = Number(m[1]);
+                            if (pct > 0 && pct <= 100) ratio = pct / 100;
+                        }
+                    }
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        if (ratio != null) return;
+                        let childDoc = null;
+                        try { childDoc = frame.contentDocument; } catch (e) { childDoc = null; }
+                        if (childDoc) scan(childDoc, depth + 1);
+                    }
+                };
+                try { scan(typeof document === 'undefined' ? null : document, 0); } catch (e) { /* ignore */ }
+                if (ratio != null && ratio > 0 && ratio <= 1) this._unitCompletionRatio = ratio;
+                return ratio != null ? ratio : fallback;
             },
             _videoSelectors() {
                 // F6（#18 #52 #55）：播放器 video 选择器的唯一来源，_getVideoEl 与视频任务点查找共用。
@@ -1573,6 +1622,7 @@
                 this._isPlaying = false;
                 this._emptyContentStreak = 0;
                 this._videoRefreshTried = false;
+                this._unitCompletionRatio = null;
                 this._currentVideoTaskIndex = 0;
                 this._llmChapterSuggesting = false;
                 this._llmChapterSuggestDone = false;

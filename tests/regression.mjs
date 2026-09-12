@@ -12,6 +12,7 @@
  *   F3 无视频节点：可识别完成才前进，识别不了则安全停止且连续前进受上限约束
  *   F21 空视频节点（标题「视频」但平台内容占位「暂无内容」）不按加载失败重试触顶，转入无视频流程
  *   F22 手动暂停/切节点后恢复：僵尸 iframe 文档里的 video 不再被复用，超时自动重新定位
+ *   F23 页面「完成条件 ≥X%」识别 + 多任务点片尾提前交接（省掉最后 10%）
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -819,6 +820,74 @@ test('F22-3 GUI 恢复播放前重新同步：清理僵尸缓存并播放活动�
     await env.advance(3000);
     check('F22-3 恢复后缓存切换到新视频', app._videoEl === v2, '');
     check('F22-3 新视频已开始播放', v2.__calls.play >= 1, 'calls=' + v2.__calls.play);
+});
+
+// ---------------------------------------------------------------------------
+// F23 「完成条件 ≥X%」识别 + 多任务点片尾提前交接（真机：984s 视频 92.0% 被平台标记完成）
+// ---------------------------------------------------------------------------
+
+test('F23-1 解析「完成条件 观看时长需 ≥ 总时长的 90%」并按比例回退配置', async () => {
+    const html = tree(chapterSpecs(['1.1'])) + '<iframe id="cards" src="about:blank"></iframe>' + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    await writeFrame(env, 'cards', '完成条件 观看时长需 ≥ 总时长的 90% (未完成任务点前，当前视频不可拖拽)');
+    const app = await env.boot();
+    check('F23-1 解析出 0.9', app._getUnitCompletionRatio() === 0.9, 'ratio=' + app._getUnitCompletionRatio());
+    check('F23-1 解析结果被缓存', app._unitCompletionRatio === 0.9, '');
+
+    const env100 = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="cards" src="about:blank"></iframe>' + '<div class="prev_title" title="视频"></div>' });
+    await writeFrame(env100, 'cards', '完成条件 观看时长需 ≥ 总时长的 100% (未完成任务点前，当前视频不可拖拽)');
+    const app100 = await env100.boot();
+    check('F23-1 100% 条件解析为 1（即不提前）', app100._getUnitCompletionRatio() === 1, 'ratio=' + app100._getUnitCompletionRatio());
+
+    const envNo = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const appNo = await envNo.boot();
+    check('F23-1 无文案时回退配置 0.9', appNo._getUnitCompletionRatio() === 0.9 && appNo._unitCompletionRatio === null, '');
+});
+
+test('F23-2 多任务点：当前任务点已完成且达比例 → 跳过片尾提前切下一个任务点', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe><span class="ans-job-icon ans-job-video"></span></div>'
+        + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe><span class="ans-job-icon ans-job-video"></span></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    const v1 = stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
+    const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
+    Object.defineProperty(v1, 'duration', { configurable: true, get: () => 100 });
+    Object.defineProperty(v2, 'duration', { configurable: true, get: () => 100 });
+    const app = await env.boot();
+    await env.advance(1500);
+    check('F23-2 先播第 1 个任务点', app._getVideoEl() === v1, '');
+    app._isPlaying = true;
+    v1.paused = false;
+    v1.currentTime = 95;
+    env.window.document.getElementById('ct1').classList.add('ans-job-finished'); // 平台在 92% 左右标记完成
+    app._checkVideoStatus();
+    check('F23-2 打印跳过片尾日志', env.xt.has('跳过片尾切换下一个任务点'), JSON.stringify(env.xt.logs.slice(-4)));
+    await env.advance(3000);
+    check('F23-2 已切到第 2 个任务点', app._currentVideoTaskIndex === 1, 'idx=' + app._currentVideoTaskIndex);
+    check('F23-2 第 2 个任务点已开播', app._getVideoEl() === v2, '');
+});
+
+test('F23-3 未获平台完成标记时不抢跑（比例达标也不提前切换）', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe><span class="ans-job-icon ans-job-video"></span></div>'
+        + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe><span class="ans-job-icon ans-job-video"></span></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    const v1 = stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
+    stubVideo(env, d2.getElementById('video_html5_api'), {});
+    Object.defineProperty(v1, 'duration', { configurable: true, get: () => 100 });
+    const app = await env.boot();
+    await env.advance(1500);
+    app._isPlaying = true;
+    v1.paused = false;
+    v1.currentTime = 95;
+    app._checkVideoStatus();
+    check('F23-3 未标记完成 → 不提前切换', app._currentVideoTaskIndex === 0 && !env.xt.has('跳过片尾切换下一个任务点'), 'idx=' + app._currentVideoTaskIndex);
 });
 
 // ---------------------------------------------------------------------------
