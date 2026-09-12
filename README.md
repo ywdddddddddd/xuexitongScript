@@ -26,13 +26,15 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F23 | 多视频任务点小节：非最后一个任务点要播到 100% 才切换（每个视频白播最后 10%） | 用户反馈（页面「完成条件 ≥90%」文案） | 新增「完成条件」文案识别（解析 90%/100% 等比例并缓存到本小节）；**当前任务点**已被平台标记完成且播放达比例时，立即切下一个视频任务点，不再等 `ended`（真机实测：984s 视频在 92.0% 被标记，单任务点省约 79s；4 任务点节点合计约 5 分钟） |
 
+| F24 | 同节点多视频只能串行播，节点耗时长（实验特性） | 用户提议（错播/并发探索） | 可选 `concurrentPlayback`（默认关闭）：错开启动同节点最多 `concurrentLanes` 路视频，副车道被平台暂停时自动静音重播（受 `laneMaxReplaysPerUnit` 上限）；真机验证并发的第二路在 206/218s 被平台正常标记完成（服务端按 objectId 独立计数）。保活 tick 复用既有视频监控循环，不新增定时器 |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
 - [v3_optimized.user.js](v3_optimized.user.js) —— Tampermonkey 油猴版（构建产物）
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F23，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F24，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
@@ -100,7 +102,7 @@ llmWorkWaitMs: 90000
 - `playTimeoutMs`（默认 8000ms）：`play()` Promise 超时保护——媒体管线冻结时 `play()` 可能既不成功也不失败，超时后按播放失败走重试/静音兜底。
 - `interactionGuard`（默认 true）：检测视频互动答题弹窗并暂停自动跳转；脚本不会自动答题。
 - `taskDialogClickCooldownMs` / `taskDialogMaxClicksPerUnit`（默认 8000ms / 3 次）：处理平台「当前章节还有任务点未完成」弹窗时的冷却与每小节次数上限，避免反复点击（#43 #54）。
-- `guiEnabled`（默认 **true**）：右上角可视化监控面板，显示播放状态、进度、LLM 状态与实时日志；纯本地 DOM，不产生网络请求。
+- `guiEnabled`（默认 **true**）：右上角可视化监控面板，显示播放状态、进度、LLM 状态与实时日志；纯本地 DOM，不产生网络请求。V3.6 补丁（GUI v2）：卡片式深色面板、运行状态指示灯、视频进度条与平滑动画、开/关按钮配色、更大的点击区域与悬停反馈。
 - `llmEnabled`（默认 **false**）：是否允许调用大模型自动选择互动题答案。开启前先配置密钥（面板「设置 Key」或 `app.setLlmKey(...)`，密钥只存内存、绝不落盘）。
 - `llmMaxTokens`（默认 **4096**）：实测推理 token 可达 1600+，1024 会耗尽配额导致空响应（`finish_reason=length`），不建议调小。
 - `llmJsonMode`（默认 **true**）：请求体带 `response_format:{"type":"json_object"}`，约束模型只输出 JSON；自定义端点不支持该参数时设为 `false`。
@@ -110,6 +112,9 @@ llmWorkWaitMs: 90000
 - `llmWorkWaitMs`（默认 90000）：提交后等待任务点标记完成的最长时间；工作页出现「待批阅/已完成/已提交」同样视为提交成功；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。V3.6 补丁（F23）：若页面标注「完成条件…观看时长需 ≥ 总时长的 90%」，脚本优先采用页面上的比例；多任务点小节里对**已获完成标记**的任务点提前交接，省掉片尾无效播放。
+- `concurrentPlayback`（默认 **false**，V3.6 补丁 F24，实验特性）：同节点多视频并发播放。开启后脚本在小节内错开启动最多 `concurrentLanes` 路视频任务点，并周期性把被平台暂停的副车道重新拉起（副车道自动静音）。真机实测平台会周期性暂停副车道、重播可拉回，且并发的第二路任务点可被平台正常标记完成。**有风控风险，默认关闭，确认接受风险再开启**。
+- `concurrentLanes`（默认 2）：并发路数上限（2~4）。
+- `laneKeeperIntervalMs` / `laneMaxReplaysPerUnit`（默认 3000ms / 240 次）：副车道保活检查间隔与每小节重播上限。
 - `pauseGuard`（默认 **true**，V3.6 新增）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停。只拦截「最近 1.5 秒无点击/按键」的暂停调用；用户主动点击暂停仍正常生效。如遇异常可设为 `false` 关闭。
 - `cxSecretDecode`（默认 **true**，V3.6 新增）：自动解密平台的 font-cxsecret 反copy字体（用系统 Noto Sans SC/思源黑体同字形做位图匹配），解密题干与选项后再交给 LLM 作答/匹配；无字体或无 Canvas 环境自动跳过。
 - `workSanityLock`（默认 **true**，V3.6 新增）：题目合格性预检 + 提交锁。给 AI 发请求前先校验题目（排除界面文案/过短/选项不足等异常），异常或未全部作答时**上锁拒绝提交**，交人工处理（修复真机演练中「编辑器外壳被当选项 → 提交空值」事故）。

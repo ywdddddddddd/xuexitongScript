@@ -116,6 +116,12 @@
                 taskDialogMaxClicksPerUnit: 3,
                 videoTaskFrameMaxDepth: 4,
                 videoTaskFrameMaxCount: 12,
+                // F24（V3.6 补丁，实验特性）：同节点多视频并发播放（错开启动 + 副车道保活重播）。
+                // 真机实测：平台会周期性暂停副车道，重播可拉回；并发的第二路 206/218s 被平台正常标记完成。
+                concurrentPlayback: false,
+                concurrentLanes: 2,
+                laneKeeperIntervalMs: 3000,
+                laneMaxReplaysPerUnit: 240,
                 // F12（V3.6）：片尾停滞保护——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进。
                 videoCompleteRatio: 0.9,
                 // F15（V3.6）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停（真机实测：window 上 mouseout 监听调用 pause()）。
@@ -181,6 +187,10 @@
             _guiPanelEl: null,
             _guiStatusEl: null,
             _guiLogEl: null,
+            _guiProgressFill: null,
+            _guiProgressText: null,
+            _guiDotEl: null,
+            _guiBtns: null,
             _guiBodyEl: null,
             _guiCollapseHandler: null,
             _guiLogs: [],
@@ -264,6 +274,11 @@
                 this._bindStepNavigation();
                 this._startInteractionWatcher();
                 this._bindVisibilityRecovery();
+                this._laneReplays = 0;
+                this._laneCapLogged = false;
+                this._laneLoadTried = null;
+                this._laneLastKeeperTs = 0;
+                this._startLaneKeeper();
                 this._guiInit();
                 this.play();
             },
@@ -678,6 +693,14 @@
                             }
                         } catch (e) { /* 保底：不阻塞主流程 */ }
                     }
+                    // F24：并发车道保活（复用本循环，不新增定时器；按 laneKeeperIntervalMs 节流）。
+                    if (this.configs.concurrentPlayback) {
+                        const laneInterval = Math.max(1000, Number(this.configs.laneKeeperIntervalMs) || 3000);
+                        if (now - (this._laneLastKeeperTs || 0) >= laneInterval) {
+                            this._laneLastKeeperTs = now;
+                            this._laneKeeperTick();
+                        }
+                    }
                     if (video.paused && this._isPlaying) {
                         this._progressStreakStart = 0;
                         if (this._isProgressStalled(now)) {
@@ -714,6 +737,11 @@
             _videoRefreshTried: false,
             // F23（V3.6 补丁）：本小节「完成条件」文案解析出的比例（如 90% → 0.9）；null=未解析到，按配置回退。
             _unitCompletionRatio: null,
+            // F24：并发车道保活状态
+            _laneReplays: 0,
+            _laneCapLogged: false,
+            _laneLoadTried: null,
+            _laneLastLogTs: 0,
             _stepAdvanceTimes: 0,
             _stepSwitchAt: 0,
             _stepSwitchPending: false,
@@ -1177,6 +1205,63 @@
                 if (ratio != null && ratio > 0 && ratio <= 1) this._unitCompletionRatio = ratio;
                 return ratio != null ? ratio : fallback;
             },
+            _startLaneKeeper() {
+                // F24（V3.6 补丁）：并发车道保活 —— 错开启动同节点多个视频任务点，并周期性拉回被平台暂停的副车道。
+                // 说明：keeper 不新增定时器，tick 复用既有视频监控循环（H1 定时器总账约束）；监控停止时保活自动停止。
+                if (!this.configs.concurrentPlayback) return;
+                this._laneLastKeeperTs = 0;
+                console.log('%c[并发] 已启用 ' + (Number(this.configs.concurrentLanes) || 2) + ' 路并发播放（实验特性：副车道被平台暂停时自动重播）', 'color:#8B5CF6');
+            },
+            _laneKeeperTick() {
+                if (!this.configs.concurrentPlayback) return;
+                try {
+                    const lanes = Math.max(2, Math.min(4, Number(this.configs.concurrentLanes) || 2));
+                    const frames = this._getVideoTaskFrames ? this._getVideoTaskFrames() : [];
+                    if (!frames || frames.length < 2) return;
+                    const targets = [];
+                    const start = Math.max(0, Number(this._currentVideoTaskIndex) || 0);
+                    for (let i = start; i < frames.length && targets.length < lanes; i++) {
+                        if (!this._isVideoTaskFrameComplete(frames[i])) targets.push(i);
+                    }
+                    if (targets.length < 2) return;
+                    const cap = Math.max(1, Number(this.configs.laneMaxReplaysPerUnit) || 240);
+                    let played = 0;
+                    for (let k = 0; k < targets.length; k++) {
+                        const idx = targets[k];
+                        const v = this._videoElInFrame ? this._videoElInFrame(frames[idx]) : null;
+                        if (!v) continue;
+                        try {
+                            if (k > 0 && !v.muted) v.muted = true; // 副车道静音，避免多重声音
+                            if (v.ended) continue;
+                            if (v.readyState === 0) {
+                                // 真实页面里任务点视频常是 preload=none：先 load() 一次，同时仍尝试静音 play() 让它尽快起播。
+                                const tried = this._laneLoadTried || (this._laneLoadTried = {});
+                                if (!tried[idx]) { tried[idx] = true; try { v.load(); } catch (e) { /* ignore */ } }
+                            }
+                            if (v.paused) {
+                                if (this._laneReplays >= cap) {
+                                    if (!this._laneCapLogged) {
+                                        this._laneCapLogged = true;
+                                        console.warn('%c[并发] 副车道重播已达上限（' + cap + ' 次/小节），停止保活（不影响任务点正常流程）', 'color:#FF9800');
+                                    }
+                                    continue;
+                                }
+                                this._laneReplays++;
+                                const p = v.play();
+                                if (p && typeof p.catch === 'function') p.catch(() => {});
+                                played++;
+                            }
+                        } catch (e) { /* 单车道失败不影响其他 */ }
+                    }
+                    if (played > 0) {
+                        const now = Date.now();
+                        if (now - (this._laneLastLogTs || 0) > 60000) {
+                            this._laneLastLogTs = now;
+                            console.log('%c[并发] ' + targets.length + ' 路目标保活中（累计重播 ' + this._laneReplays + ' 次）', 'color:#8B5CF6');
+                        }
+                    }
+                } catch (e) { /* 并发为实验特性：异常绝不外溢 */ }
+            },
             _videoSelectors() {
                 // F6（#18 #52 #55）：播放器 video 选择器的唯一来源，_getVideoEl 与视频任务点查找共用。
                 return [
@@ -1623,6 +1708,10 @@
                 this._emptyContentStreak = 0;
                 this._videoRefreshTried = false;
                 this._unitCompletionRatio = null;
+                this._laneReplays = 0;
+                this._laneCapLogged = false;
+                this._laneLoadTried = null;
+                this._laneLastKeeperTs = 0;
                 this._currentVideoTaskIndex = 0;
                 this._llmChapterSuggesting = false;
                 this._llmChapterSuggestDone = false;
@@ -2098,68 +2187,107 @@
                 this._guiDestroy();
                 const panel = document.createElement('div');
                 panel.id = 'xt-gui-panel';
-                panel.style.cssText = 'position:fixed;top:10px;right:10px;width:330px;max-height:48vh;z-index:2147483000;'
-                    + 'background:rgba(17,24,39,0.94);color:#e5e7eb;font:12px/1.5 Consolas,Menlo,monospace;'
-                    + 'border:1px solid #374151;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.35);overflow:hidden;';
+                panel.style.cssText = 'position:fixed;top:12px;right:12px;width:340px;z-index:2147483000;'
+                    + 'background:linear-gradient(180deg,rgba(15,23,42,.97),rgba(15,23,42,.93));color:#e2e8f0;'
+                    + 'font:12px/1.6 "Microsoft YaHei",system-ui,-apple-system,sans-serif;'
+                    + 'border:1px solid rgba(148,163,184,.28);border-radius:14px;overflow:hidden;'
+                    + 'box-shadow:0 12px 32px rgba(2,6,23,.5);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);'
+                    + 'opacity:0;transform:translateY(-8px);transition:opacity .25s ease,transform .25s ease;';
+                const styleEl = document.createElement('style');
+                styleEl.textContent = '@keyframes xtPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 6px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}'
+                    + '#xt-gui-panel button{transition:background .15s ease,transform .08s ease,border-color .15s ease;}'
+                    + '#xt-gui-panel button:hover{background:#334155 !important;border-color:rgba(148,163,184,.45) !important;}'
+                    + '#xt-gui-panel button:active{transform:scale(.97);}'
+                    + '#xt-gui-panel pre::-webkit-scrollbar{width:6px;}'
+                    + '#xt-gui-panel pre::-webkit-scrollbar-thumb{background:rgba(148,163,184,.35);border-radius:3px;}';
+                panel.appendChild(styleEl);
                 const header = document.createElement('div');
-                header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:#1f2937;';
+                header.style.cssText = 'display:flex;align-items:center;gap:8px;padding:9px 12px;'
+                    + 'background:rgba(30,41,59,.85);border-bottom:1px solid rgba(148,163,184,.18);';
+                const dot = document.createElement('span');
+                dot.title = '运行状态指示灯';
+                dot.style.cssText = 'width:9px;height:9px;border-radius:50%;background:#64748b;flex:0 0 auto;'
+                    + 'transition:background .3s ease;animation:xtPulse 2s infinite;';
                 const title = document.createElement('span');
                 title.textContent = '学习通脚本监控 ' + this.version;
-                title.style.cssText = 'font-weight:bold;color:#93c5fd;';
+                title.style.cssText = 'font-weight:600;color:#93c5fd;flex:1 1 auto;white-space:nowrap;';
                 const collapseBtn = document.createElement('button');
                 collapseBtn.type = 'button';
-                collapseBtn.textContent = '—';
-                collapseBtn.title = '折叠/展开';
-                collapseBtn.style.cssText = 'background:#374151;color:#e5e7eb;border:0;border-radius:4px;width:22px;height:18px;line-height:1;cursor:pointer;';
+                collapseBtn.textContent = '收起';
+                collapseBtn.title = '折叠 / 展开面板';
+                collapseBtn.style.cssText = 'background:#1f2937;color:#cbd5e1;border:1px solid rgba(148,163,184,.2);'
+                    + 'border-radius:8px;padding:3px 10px;font-size:11px;cursor:pointer;';
+                header.appendChild(dot);
                 header.appendChild(title);
                 header.appendChild(collapseBtn);
                 const bodyWrap = document.createElement('div');
-                bodyWrap.style.cssText = 'padding:6px 8px;';
+                bodyWrap.style.cssText = 'padding:10px 12px 12px;';
+                const progRow = document.createElement('div');
+                progRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;color:#94a3b8;font-size:11px;';
+                const progLabel = document.createElement('span');
+                progLabel.textContent = '视频进度';
+                const progText = document.createElement('span');
+                progText.textContent = '等待视频…';
+                progText.style.cssText = 'color:#cbd5e1;font-variant-numeric:tabular-nums;';
+                progRow.appendChild(progLabel);
+                progRow.appendChild(progText);
+                const progTrack = document.createElement('div');
+                progTrack.style.cssText = 'height:8px;border-radius:5px;background:#1e293b;overflow:hidden;margin-bottom:10px;';
+                const progFill = document.createElement('div');
+                progFill.style.cssText = 'height:100%;width:0%;border-radius:5px;background:linear-gradient(90deg,#22c55e,#4ade80);transition:width .35s ease;';
+                progTrack.appendChild(progFill);
                 const statusEl = document.createElement('div');
-                statusEl.style.cssText = 'white-space:pre-wrap;color:#cbd5e1;';
+                statusEl.style.cssText = 'white-space:pre-wrap;color:#cbd5e1;font-size:11.5px;line-height:1.7;margin-bottom:8px;';
                 const logEl = document.createElement('pre');
-                logEl.style.cssText = 'margin:6px 0 0;padding:4px 6px;max-height:170px;overflow:auto;background:#0b1220;'
-                    + 'border-radius:6px;color:#9ca3af;font:11px/1.45 Consolas,Menlo,monospace;white-space:pre-wrap;word-break:break-all;';
+                logEl.style.cssText = 'margin:0 0 10px;padding:8px 9px;max-height:150px;overflow:auto;background:#0b1220;'
+                    + 'border:1px solid rgba(148,163,184,.12);border-radius:9px;color:#94a3b8;font:10.5px/1.5 Consolas,Menlo,monospace;'
+                    + 'white-space:pre-wrap;word-break:break-all;';
                 const btnRow = document.createElement('div');
-                btnRow.style.cssText = 'display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;';
-                const addBtn = (label, help, handler) => {
+                btnRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;';
+                const addBtn = (label, help, handler, key) => {
                     const b = document.createElement('button');
                     b.type = 'button';
                     b.textContent = label;
                     b.title = help;
-                    b.style.cssText = 'background:#374151;color:#e5e7eb;border:0;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;';
-                    b.addEventListener('click', handler);
+                    b.style.cssText = 'background:#1f2937;color:#e2e8f0;border:1px solid rgba(148,163,184,.2);border-radius:9px;'
+                        + 'padding:7px 8px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;';
+                    b.addEventListener('click', () => {
+                        try { handler(); } catch (err) { console.error('GUI 按钮处理失败:', err); }
+                    });
                     btnRow.appendChild(b);
+                    if (key) {
+                        if (!this._guiBtns) this._guiBtns = {};
+                        this._guiBtns[key] = b;
+                    }
                     return b;
                 };
-                addBtn('暂停/继续', '暂停或恢复自动播放', () => {
+                addBtn('暂停播放', '暂停或恢复自动播放（恢复前会自动重新同步）', () => {
                     if (this._isPlaying) {
                         this._clearCheckInterval();
                         this._isPlaying = false;
                         console.log('%c[GUI] 已暂停自动播放（点「暂停/继续」恢复）', 'color:#FF9800');
                     } else {
                         console.log('%c[GUI] 恢复自动播放', 'color:#4CAF50');
-                        // F22：暂停期间用户可能手动切过节点、平台重建过 iframe → 先重新同步再恢复，
-                        // 避免拿着旧节点/僵尸元素反复 play() 超时（真机事故路径）。
+                        // F22：暂停期间用户可能手动切过节点、平台重建过 iframe → 先重新同步再恢复。
                         this._resumeAfterManualPause();
                     }
-                });
-                addBtn('下一节', '立即切换到下一小节', () => this.nextUnit());
-                addBtn('LLM 开/关', '切换 llmEnabled（默认关闭）', () => {
+                    this._guiRefreshStatus(true);
+                }, 'pause');
+                addBtn('下一节', '立即切换到下一小节', () => this.nextUnit(), 'next');
+                addBtn('LLM 已关', '切换 llmEnabled（默认关闭）', () => {
                     this.configs.llmEnabled = !this.configs.llmEnabled;
                     console.log('%c[GUI] LLM 应答已' + (this.configs.llmEnabled ? '开启' : '关闭'), 'color:#2196F3');
                     this._guiRefreshStatus(true);
-                });
-                addBtn('自动提交 开/关', '切换 llmAutoSubmit（默认关闭：先选答案再人工提交）', () => {
+                }, 'llm');
+                addBtn('自动提交关', '切换 llmAutoSubmit（默认关闭：先选答案再人工提交）', () => {
                     this.configs.llmAutoSubmit = !this.configs.llmAutoSubmit;
                     console.log('%c[GUI] LLM 自动提交已' + (this.configs.llmAutoSubmit ? '开启' : '关闭'), 'color:#2196F3');
                     this._guiRefreshStatus(true);
-                });
-                addBtn('设置 Key', '设置 LLM API Key（只保存在当前页面内存）', () => this._guiAskKey());
-                addBtn('清空日志', '清空面板日志', () => {
-                    this._guiLogs = [];
-                    if (logEl) logEl.textContent = '';
-                });
+                }, 'submit');
+                addBtn('设置 Key', '设置 LLM API Key（只保存在当前页面内存）', () => this._guiAskKey(), 'key');
+                addBtn('清空日志', '清空面板日志', () => { this._guiLogs = []; if (logEl) logEl.textContent = ''; }, 'clear');
+                bodyWrap.appendChild(progRow);
+                bodyWrap.appendChild(progTrack);
                 bodyWrap.appendChild(statusEl);
                 bodyWrap.appendChild(logEl);
                 bodyWrap.appendChild(btnRow);
@@ -2168,15 +2296,24 @@
                 const onCollapse = () => {
                     this._guiCollapsed = !this._guiCollapsed;
                     bodyWrap.style.display = this._guiCollapsed ? 'none' : 'block';
-                    collapseBtn.textContent = this._guiCollapsed ? '+' : '—';
+                    collapseBtn.textContent = this._guiCollapsed ? '展开' : '收起';
                 };
-                collapseBtn.addEventListener('click', onCollapse);
+                collapseBtn.addEventListener('click', () => onCollapse());
                 this._guiPanelEl = panel;
                 this._guiStatusEl = statusEl;
                 this._guiLogEl = logEl;
                 this._guiBodyEl = bodyWrap;
+                this._guiProgressFill = progFill;
+                this._guiProgressText = progText;
+                this._guiDotEl = dot;
                 this._guiCollapseHandler = onCollapse;
                 document.body.appendChild(panel);
+                try {
+                    requestAnimationFrame(() => { panel.style.opacity = '1'; panel.style.transform = 'translateY(0)'; });
+                } catch (e) {
+                    panel.style.opacity = '1';
+                    panel.style.transform = 'none';
+                }
                 this._guiHookConsole();
                 if (this._guiLogEl) this._guiLogEl.textContent = this._guiLogs.join('\n');
                 this._guiRefreshStatus(true);
@@ -2190,6 +2327,10 @@
                 this._guiStatusEl = null;
                 this._guiLogEl = null;
                 this._guiBodyEl = null;
+                this._guiProgressFill = null;
+                this._guiProgressText = null;
+                this._guiDotEl = null;
+                this._guiBtns = null;
                 this._guiCollapseHandler = null;
                 try {
                     const hook = window.__xuexitongPlayerGuiConsoleHook;
@@ -2265,26 +2406,58 @@
             _guiRefreshStatus(force) {
                 if (!this._guiStatusEl) return;
                 const now = Date.now();
-                if (!force && now - (this._guiLastRefreshTs || 0) < 500) return;
+                if (!force && now - (this._guiLastRefreshTs || 0) < 400) return;
                 this._guiLastRefreshTs = now;
                 try {
                     const cell = this._cellData || {};
                     const chapters = Number(cell.cells) || 0;
                     const videos = Number(this._videoTaskCount) || 0;
+                    // F9+：用缓存的视频元素展示进度（避免每次日志刷新都重扫 iframe）。
+                    const v = this._videoEl || null;
+                    let ratio = 0;
+                    let ct = 0;
+                    let dur = 0;
+                    if (v) {
+                        ct = Number(v.currentTime) || 0;
+                        dur = Number(v.duration) || 0;
+                        if (dur > 0) ratio = Math.min(1, ct / dur);
+                    }
+                    if (this._guiProgressFill) this._guiProgressFill.style.width = (ratio * 100).toFixed(1) + '%';
+                    if (this._guiProgressText) {
+                        this._guiProgressText.textContent = dur > 0
+                            ? (Math.round(ratio * 100) + '%  ' + Math.floor(ct) + '/' + Math.round(dur) + 's')
+                            : '等待视频…';
+                    }
+                    if (this._guiDotEl) {
+                        const playing = !!this._isPlaying && !this._interactionBlocked;
+                        this._guiDotEl.style.background = this._interactionBlocked ? '#f59e0b' : (playing ? '#22c55e' : '#64748b');
+                        this._guiDotEl.style.animation = playing ? 'xtPulse 2s infinite' : 'none';
+                    }
                     const lines = [];
-                    lines.push('状态: ' + (this._isPlaying ? '播放中' : '空闲')
-                        + ' ｜ 步骤: ' + (this._currentStepTitle() || '未知')
-                        + ' ｜ 互动题: ' + (this._interactionBlocked ? '暂停（等人工）' : '正常'));
-                    lines.push('进度: 章节 ' + ((Number(cell.currentCellIndex) || 0) + 1) + '/' + (chapters || '?')
-                        + ' ｜ 视频任务点 ' + (videos ? ((Number(this._currentVideoTaskIndex) || 0) + 1) + '/' + videos : '?'));
-                    lines.push('LLM: ' + (this.configs.llmEnabled ? '开' : '关')
-                        + ' ｜ 密钥: ' + (this._llmApiKey ? '已配置' : '未配置')
-                        + ' ｜ 已应答: ' + this._llmAnswersThisSession + '/' + this.configs.llmMaxAnswersPerSession
-                        + ' ｜ 自动提交: ' + (this.configs.llmAutoSubmit ? '开' : '关'));
-                    if (this._llmLastAnswer) lines.push('最近答案: ' + this._llmLastAnswer.q + ' → ' + this._llmLastAnswer.a);
-                    if (this._llmChapterSuggestedCount) lines.push('章节测验建议: ' + this._llmChapterSuggestedCount + ' 题（仅提示，需人工确认）');
+                    lines.push('状态 ' + (this._isPlaying ? '播放中' : '已暂停/空闲')
+                        + ' ｜ 步骤 ' + (this._currentStepTitle() || '未知')
+                        + (this._interactionBlocked ? ' ｜ 互动题暂停（等人工）' : ''));
+                    lines.push('章节 ' + ((Number(cell.currentCellIndex) || 0) + 1) + '/' + (chapters || '?')
+                        + ' ｜ 任务点 ' + (videos ? ((Number(this._currentVideoTaskIndex) || 0) + 1) + '/' + videos : '?'));
+                    lines.push('LLM ' + (this.configs.llmEnabled ? '开' : '关')
+                        + ' ｜ 密钥 ' + (this._llmApiKey ? '已配置' : '未配置')
+                        + ' ｜ 已应答 ' + this._llmAnswersThisSession + '/' + this.configs.llmMaxAnswersPerSession
+                        + ' ｜ 自动提交 ' + (this.configs.llmAutoSubmit ? '开' : '关'));
+                    if (this._llmLastAnswer) lines.push('最近答案 ' + String(this._llmLastAnswer.q || '').slice(0, 16) + ' → ' + this._llmLastAnswer.a);
+                    if (this._llmChapterSuggestedCount) lines.push('章节测验建议 ' + this._llmChapterSuggestedCount + ' 题（仅提示）');
                     this._guiStatusEl.textContent = lines.join('\n');
-                } catch (e) { /* ignore */ }
+                    const setToggle = (key, on, onLabel, offLabel) => {
+                        const b = this._guiBtns && this._guiBtns[key];
+                        if (!b) return;
+                        b.textContent = on ? onLabel : offLabel;
+                        b.style.background = on ? 'rgba(34,197,94,.18)' : '#1f2937';
+                        b.style.borderColor = on ? 'rgba(34,197,94,.65)' : 'rgba(148,163,184,.2)';
+                        b.style.color = on ? '#86efac' : '#e2e8f0';
+                    };
+                    setToggle('pause', !this._isPlaying, '继续播放', '暂停播放');
+                    setToggle('llm', !!this.configs.llmEnabled, 'LLM 已开', 'LLM 已关');
+                    setToggle('submit', !!this.configs.llmAutoSubmit, '自动提交开', '自动提交关');
+                } catch (e) { /* GUI 绝不影响主流程 */ }
             },
             _guiAskKey() {
                 let value = null;

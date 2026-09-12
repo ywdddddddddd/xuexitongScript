@@ -13,6 +13,7 @@
  *   F21 空视频节点（标题「视频」但平台内容占位「暂无内容」）不按加载失败重试触顶，转入无视频流程
  *   F22 手动暂停/切节点后恢复：僵尸 iframe 文档里的 video 不再被复用，超时自动重新定位
  *   F23 页面「完成条件 ≥X%」识别 + 多任务点片尾提前交接（省掉最后 10%）
+ *   F24 同节点多视频并发（错开启动 + 副车道保活重播，实验特性）
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -888,6 +889,73 @@ test('F23-3 未获平台完成标记时不抢跑（比例达标也不提前切�
     v1.currentTime = 95;
     app._checkVideoStatus();
     check('F23-3 未标记完成 → 不提前切换', app._currentVideoTaskIndex === 0 && !env.xt.has('跳过片尾切换下一个任务点'), 'idx=' + app._currentVideoTaskIndex);
+});
+
+// ---------------------------------------------------------------------------
+// F24 同节点多视频并发播放（错开启动 + 副车道保活重播；真机实测并发第二路可被平台计入）
+// ---------------------------------------------------------------------------
+
+test('F24-1 默认关闭并发：不会额外播放其他任务点视频', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
+    const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
+    const app = await env.boot();
+    await env.advance(6000);
+    check('F24-1 默认不打印并发启用日志', !env.xt.has('[并发]'), '');
+    check('F24-1 第二个任务点未被额外播放', v2.__calls.play === 0, 'calls=' + v2.__calls.play);
+    app.destroy();
+});
+
+test('F24-2 开启并发后副车道被自动重播并静音', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
+    const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
+    const app = await env.boot();
+    await env.advance(1500);
+    app.configs.concurrentPlayback = true;
+    app.configs.laneKeeperIntervalMs = 1000;
+    app._startLaneKeeper();
+    await env.advance(2500);
+    check('F24-2 打印并发启用日志', env.xt.has('[并发]'), '');
+    check('F24-2 副车道被拉起播放', v2.__calls.play >= 1, 'calls=' + v2.__calls.play);
+    check('F24-2 副车道被静音', v2.muted === true, '');
+    app.destroy();
+});
+
+test('F24-3 副车道重播次数受上限约束', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
+    const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
+    const app = await env.boot();
+    await env.advance(1500);
+    app.configs.concurrentPlayback = true;
+    app.configs.laneKeeperIntervalMs = 1000;
+    app.configs.laneMaxReplaysPerUnit = 2;
+    app._laneReplays = 0;
+    app._laneCapLogged = false;
+    app._startLaneKeeper();
+    for (let i = 0; i < 4; i++) { await env.advance(1200); v2.paused = true; }
+    check('F24-3 重播次数不超过上限', app._laneReplays <= 2, 'replays=' + app._laneReplays);
+    check('F24-3 达到上限后打印提示', env.xt.has('重播已达上限'), '');
+    app.destroy();
 });
 
 // ---------------------------------------------------------------------------
