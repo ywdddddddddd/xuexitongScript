@@ -957,6 +957,38 @@ test('F16-1 后台保活：隐藏状态下被暂停的视频直接在后台续�
     check('F16-1 视频已恢复播放', video.paused === false, 'paused=' + video.paused);
     app._stopHiddenKeepAlive();
 });
+test('F20-1 任务点图标级校验：无任务点/全部完成 → 按完成推进；有未完成 → 不误判', async () => {
+    const html = tree(chapterSpecs(['1.1'], ['2.1']))
+        + '<div class="ans-attach-ct"><div class="ans-job-icon"></div></div>'
+        + '<div class="ans-attach-ct ans-job-finished"><div class="ans-job-icon"></div></div>';
+    const env = createEnv({ html });
+    const app = await env.boot();
+    await env.advance(1500);
+    const tp = app._countUnfinishedTaskPoints();
+    check('F20-1 统计任务点（2 个，1 个未完成）', tp.total === 2 && tp.unfinished === 1, JSON.stringify(tp));
+    // 全部完成场景：第二个场景单独建页
+    const env2 = createEnv({ html: tree(chapterSpecs(['1.1'], ['2.1'])) + '<div class="ans-attach-ct ans-job-finished"><div class="ans-job-icon"></div></div>' });
+    const app2 = await env2.boot();
+    await env2.advance(1500);
+    app2._handleNoVideoNode();
+    await env2.advance(5000);
+    check('F20-1 全部完成任务点 → 按完成推进（有树节点点击）', env2.treeClicks().length >= 1, JSON.stringify(env2.treeClickTitles()));
+    check('F20-1 日志包含图标级校验依据', env2.xt.has('图标级校验'), '');
+    // 无任务点场景：不得按完成推进（保持 F3 安全停止设计）
+    const env4 = createEnv({ html: tree(chapterSpecs(['1.1'], ['2.1'])) });
+    const app4 = await env4.boot();
+    await env4.advance(1500);
+    app4._handleNoVideoNode();
+    await env4.advance(5000);
+    check('F20-1 无任务点 → 不按完成推进（安全停止）', env4.treeClicks().length === 0 && !env4.xt.has('图标级校验'), JSON.stringify(env4.treeClickTitles()));
+    // 有未完成任务点：不得按完成推进
+    const env3 = createEnv({ html: tree(chapterSpecs(['1.1'], ['2.1'])) + '<div class="ans-attach-ct"><div class="ans-job-icon"></div></div>' });
+    const app3 = await env3.boot();
+    await env3.advance(1500);
+    app3._handleNoVideoNode();
+    await env3.advance(5000);
+    check('F20-1 有未完成任务点 → 不按完成推进', env3.treeClicks().length === 0 && !env3.xt.has('图标级校验'), JSON.stringify(env3.treeClickTitles()));
+});
 test('F19-1 题目合格性预检 + 提交锁（异常一律不提交）', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
     const app = await env.boot();

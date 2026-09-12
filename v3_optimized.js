@@ -791,6 +791,54 @@
                     }, this.configs.retryInterval);
                 }
             },
+            // F20（V3.6）：任务点图标级校验 —— 遍历所有同源文档，统计「未完成任务点」数量。
+            // 判定依据与平台一致：.ans-job-icon / iframe[jobid] 的父容器带有 ans-job-finished 即已完成。
+            // 真机背景：课件/PPT 节点做完后仍报「无法识别完成状态」，需要图标级证据支撑自动推进。
+            _countUnfinishedTaskPoints() {
+                let total = 0;
+                let unfinished = 0;
+                const seenEls = new Set();
+                const seenDocs = new Set();
+                const countEl = (el) => {
+                    if (!el || seenEls.has(el)) return;
+                    seenEls.add(el);
+                    total++;
+                    let done = false;
+                    try { done = !!(el.parentElement && el.parentElement.classList.contains('ans-job-finished')); } catch (e) { done = false; }
+                    if (!done) unfinished++;
+                };
+                const visit = (doc, depth) => {
+                    if (!doc || depth > 6 || seenDocs.has(doc)) return;
+                    seenDocs.add(doc);
+                    let icons = [];
+                    try { icons = Array.from(doc.querySelectorAll('.ans-job-icon')); } catch (e) { icons = []; }
+                    for (const el of icons) countEl(el);
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        let jobid = '';
+                        try { jobid = String(frame.getAttribute('jobid') || ''); } catch (e) { jobid = ''; }
+                        if (jobid) {
+                            let holder = null;
+                            try { holder = frame.closest ? frame.closest('.ans-attach-ct') : null; } catch (e) { holder = null; }
+                            if (holder) {
+                                if (seenEls.has(holder)) continue;
+                                seenEls.add(holder);
+                                total++;
+                                let done = false;
+                                try { done = holder.classList.contains('ans-job-finished'); } catch (e) { done = false; }
+                                if (!done) unfinished++;
+                                continue;
+                            }
+                        }
+                        let childDoc = null;
+                        try { childDoc = frame.contentDocument; } catch (e) { childDoc = null; }
+                        if (childDoc) visit(childDoc, depth + 1);
+                    }
+                };
+                visit(typeof document === 'undefined' ? null : document, 0);
+                return { total: total, unfinished: unfinished };
+            },
             _handleNoVideoNode() {
                 // F3（#38 #42 #43 #50）：无视频/课件页不再默认卡死，但也不能盲目乱跳：
                 //   1) 只有「能识别出该节点已完成/无任务点」时才自动前进；
@@ -803,6 +851,21 @@
                 if (this._videoTaskAllComplete) {
                     verdict.completed = true;
                     verdict.signals = (verdict.signals || []).concat(['小节内视频任务点全部完成']);
+                }
+
+                // F20（V3.6）：在判定「无法识别」之前，先做任务点图标级校验：
+                //   本小节没有任何任务点 / 全部任务点均已完成 → 按「已完成/无任务点」处理并推进（受上限约束）。
+                if (!verdict.completed) {
+                    const tp = this._countUnfinishedTaskPoints();
+                    // 注意：只有「存在任务点且全部完成」才算完成证据。
+                    // total === 0（完全找不到任务点）必须保持原有安全策略（默认停止/配置内有界前进），
+                    // 否则会破坏 F3 的安全停止设计（无任务点可能意味着结构未识别）。
+                    if (tp.total > 0 && tp.unfinished === 0) {
+                        verdict.completed = true;
+                        verdict.signals = (verdict.signals || []).concat(['全部 ' + tp.total + ' 个任务点均已完成（图标级校验）']);
+                    } else {
+                        console.warn('%c[任务点校验] 本小节仍有 ' + tp.unfinished + '/' + tp.total + ' 个任务点未完成，按未识别流程处理', 'color:#FF9800');
+                    }
                 }
 
                 if (verdict.completed) {
