@@ -918,6 +918,9 @@ test('F11-1 未完成的内嵌章节测验：默认不跳过、不自动前进�
     check('F11-1 检测到未完成的内嵌章节测验', env.xt.has('未完成的内嵌章节测验'), '');
     check('F11-1 不自动前进（树节点零点击）', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
     check('F11-1 不走 autoAdvance 跳过路径', !env.xt.has('按配置有界前进'), '');
+    app.nextUnit();
+    await env.advance(3000);
+    check('F11-1 nextUnit() 同样被守卫（不跳转）', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
 });
 test('F9-1 GUI 面板：默认注入、状态可见、destroy 后移除、可配置关闭', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
