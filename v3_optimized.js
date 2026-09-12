@@ -251,6 +251,12 @@
                     console.warn('%c检测到视频互动答题弹窗，已暂停自动跳转（#29 #39）。请手动完成题目，脚本会在弹窗消失后自动继续。', 'color:#FF9800');
                     return;
                 }
+                // F11（V3.6）：当前小节还有未完成的内嵌章节测验/作业时，先把作业处理完再跳转（修复「视频+作业」双任务点组合被跳过）。
+                if (this._hasUnfinishedEmbeddedWork()) {
+                    console.log('%c当前小节还有未完成的内嵌章节测验/作业，先处理作业再跳转', 'color:#FF9800');
+                    this._handleEmbeddedWorks();
+                    return;
+                }
                 // t6：进入 nextUnit 前先取消任何待执行的「视频结束自动跳转」，避免旧定时器把刚打开的小节又跳一次。
                 this._cancelDelayedNextUnit('进入 nextUnit');
                 if (this._nextUnitPending) {
@@ -2488,7 +2494,14 @@
                     if (wi >= works.length) {
                         this._workBusy = false;
                         console.log('%c[LLM] 内嵌章节测验/作业已全部提交完成，继续推进', 'color:#4CAF50');
-                        this._schedule(() => this.play(), 2500);
+                        this._schedule(() => {
+                            let videoDone = true;
+                            try {
+                                const frames = this._getVideoTaskFrames();
+                                if (frames && frames.length) videoDone = this._areAllVideoTasksComplete(frames);
+                            } catch (e) { videoDone = true; }
+                            if (videoDone) this.nextUnit(); else this.play();
+                        }, 2500);
                         return;
                     }
                     const work = works[wi];
