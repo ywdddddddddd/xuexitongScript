@@ -11,7 +11,7 @@ Reviewed on 2026-07-13 against all issues in `chaolucky18/xuexitongScript`.
 | Playback pauses or recovery is unreliable | #32, #25, #19 | Muted fallback did not restart monitoring; only the first iframe path was inspected | Restart monitoring after muted playback and search accessible nested player frames |
 | No-video/courseware pages loop or get stuck | #43, #38 | All missing-video states were treated like a chapter test and blindly clicked a next button | Distinguish chapter tests, cap their retries, and stop safely on unknown courseware; optional auto-advance remains opt-in |
 | Playback rate or task point is not accepted | #3, #6, #28, #31 | The platform can enforce rate and completion server-side | Do not attempt to bypass the platform; document this as a platform constraint |
-| Interactive or chapter-question automation | #29, #39, #42, #45 | Requires answering assessed questions | Out of scope for this reliability update; users must complete assessed interactions themselves |
+| Interactive or chapter-question automation | #29, #39, #42, #45 | Requires answering assessed questions | Default unchanged: users complete assessed interactions themselves. V3.5 adds opt-in LLM assistance (`llmEnabled=false` by default): in-video interactions can be auto-selected (auto-submit also opt-in), chapter tests only get suggestions and are never auto-clicked |
 
 ## Delivered in V3.3
 
@@ -19,6 +19,11 @@ Reviewed on 2026-07-13 against all issues in `chaolucky18/xuexitongScript`.
 2. Add startup readiness, player discovery, event-lifecycle cleanup, duplicate-navigation protection, and bounded chapter-test progression.
 3. Add a dependency-free verification command that checks syntax and confirms both entrypoints are synchronized.
 
+## Delivered in V3.5
+
+1. Inject a local-only GUI monitor panel (`guiEnabled`, default on) that mirrors console logs and shows playback / interaction / LLM state.
+2. Add opt-in LLM assistance for in-video interaction popups behind `llmEnabled=false` (OpenAI-compatible endpoint, in-memory key only, required `x-opencode-session` routing header, strict JSON answer parsing, bounded request count, automatic fallback to manual handling).
+3. Chapter-test pages keep the bounded-skip default; `llmChapterTest` only prints suggested answers to the panel and never clicks options or submit controls.
 ## Follow-up plan
 
 1. Collect sanitized DOM snapshots for courseware, completed no-video nodes, and the current player iframe layout before adding any further selectors.

@@ -11,7 +11,7 @@
  *   F2 同一章 3 个视频节点按 1→2→3 推进；解析失败时明确报错且不静默跳章
  *   F3 无视频节点：可识别完成才前进，识别不了则安全停止且连续前进受上限约束
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
- *   F5 互动答题弹窗检测与暂停跳转；不存在自动答题与外部网络/大模型调用
+ *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
  *   F7 README 仓库内链接有效、默认配置与代码一致、启动失败有可操作提示
  *   F8 历史 V1 脚本 xuexitong.js 的入口点击已加固（无未保护的 querySelector(...).click()，且仍能通过 node --check）
@@ -905,6 +905,56 @@ test('F4-8 注册点幂等且 destroy() 可完全注销（行为 + 静态审计�
     }
 });
 // ---------------------------------------------------------------------------
+// F9 GUI 面板 / F10 章节测验建议（V3.5）
+// ---------------------------------------------------------------------------
+
+test('F9-1 GUI 面板：默认注入、状态可见、destroy 后移除、可配置关闭', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const panel = env.window.document.getElementById('xt-gui-panel');
+    check('F9-1 默认注入面板', !!panel, '');
+    check('F9-1 面板含状态与日志区', !!panel && panel.textContent.indexOf('LLM') >= 0, panel ? panel.textContent.slice(0, 80) : '');
+    check('F9-1 日志镜像控制台', env.xt.has('可视化面板已就绪'), '');
+    app.destroy();
+    check('F9-1 destroy 后面板移除', !env.window.document.getElementById('xt-gui-panel'), '');
+    const env2 = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app2 = await env2.boot();
+    app2.destroy();
+    app2.configs.guiEnabled = false;
+    app2.run();
+    check('F9-1 guiEnabled=false 时不再注入面板', !env2.window.document.getElementById('xt-gui-panel'), '');
+});
+
+test('F10-1 章节测验建议模式：只提示不点击、不自动跳过、每题一次请求', async () => {
+    const quizHtml = '<div class="TiMu"><div class="Zy_TItle">1. 牙釉质的主要成分是</div>'
+        + '<ul class="Zy_ulTop"><li>A、羟基磷灰石</li><li>B、胶原蛋白</li></ul></div>'
+        + '<div class="TiMu"><div class="Zy_TItle">2. 根管治疗的第一步是</div>'
+        + '<ul class="Zy_ulTop"><li>A、开髓</li><li>B、充填</li></ul></div>';
+    const html = tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="章节测验"></div><a id="prevNextFocusNext" href="#">下一节</a>' + quizHtml;
+    const env = createEnv({ html });
+    const app = await env.boot();
+    await env.advance(2000);
+    app.configs.llmEnabled = true;
+    app.configs.llmChapterTest = true;
+    app.setLlmKey('sk-test-not-a-real-key');
+    const requests = [];
+    app.setLlmTransport((opts) => {
+        requests.push(opts);
+        const n = requests.length;
+        opts.onload(200, JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: n === 1 ? 'A' : 'B' }) } }] }));
+        return { abort() {} };
+    });
+    const nextClicksBefore = env.clicks.filter((c) => c.title.indexOf('下一节') >= 0).length;
+    await env.advance(10000);
+    check('F10-1 两道题各请求一次', requests.length === 2, 'requests=' + requests.length);
+    check('F10-1 给出建议日志', env.xt.count('章节测验建议') >= 2, 'count=' + env.xt.count('章节测验建议'));
+    const nextClicksAfter = env.clicks.filter((c) => c.title.indexOf('下一节') >= 0).length;
+    check('F10-1 建议模式下不自动跳过章节测验', nextClicksAfter === nextClicksBefore, 'before=' + nextClicksBefore + ' after=' + nextClicksAfter);
+    check('F10-1 不点击任何测验选项', env.clicks.filter((c) => /羟基磷灰石|胶原蛋白|开髓|充填/.test(c.text)).length === 0, JSON.stringify(env.clicks.map((c) => c.text)));
+    check('F10-1 明确声明不会自动点击', env.xt.has('不会自动点击'), '');
+});
+
+// ---------------------------------------------------------------------------
 // F5 互动答题弹窗（#29 #39 #42 #45）
 // ---------------------------------------------------------------------------
 
@@ -934,15 +984,54 @@ test('F5-1 检测到互动答题弹窗 → 暂停跳转 + 提示手动处理，�
     check('F5-1 恢复后打印恢复日志', env.xt.has('互动答题弹窗已消失'), '');
 });
 
-test('F5-2 全脚本不含自动答题，也不含任何外部网络/大模型调用', () => {
+test('F5-2 LLM 能力仅在显式开关后存在：默认关闭、无硬编码密钥、无 fetch/XHR 直连', () => {
     const code = stripComments(readFileSync(sourcePath, 'utf8'));
-    check('F5-2 无 autoAnswer/自动答题实现', !/autoAnswer/i.test(code), '');
-    check('F5-2 无选项点击/提交按钮逻辑', !/submitBtn|firstOption|options\[0\]\.click/.test(code), '');
-    check('F5-2 无 fetch() 调用', !/\bfetch\s*\(/.test(code), '');
-    check('F5-2 无 XMLHttpRequest / axios', !/XMLHttpRequest|axios/.test(code), '');
-    const urls = [...new Set([...code.matchAll(/https?:\/\/[^'"\s)]+/g)].map((m) => m[0]))];
-    check('F5-2 唯一外部资源是页面既有的 jQuery CDN', urls.length === 0 || urls.every((u) => u.indexOf('code.jquery.com') >= 0), JSON.stringify(urls));
+    check('F5-2 默认 llmEnabled=false 且 llmChapterTest=false', /llmEnabled:\s*false/.test(code) && /llmChapterTest:\s*false/.test(code), '');
+    check('F5-2 默认 guiEnabled=true（纯本地面板）', /guiEnabled:\s*true/.test(code), '');
+    check('F5-2 无 autoAnswer 命名', !/autoAnswer/i.test(code), '');
+    check('F5-2 无 fetch() 直连', !/\bfetch\s*\(/.test(code), '');
+    check('F5-2 无 XMLHttpRequest / axios 直连', !/XMLHttpRequest|axios/.test(code), '');
+    check('F5-2 无硬编码 API Key', !/sk-[A-Za-z0-9]{16,}/.test(code), '');
+    check('F5-2 存在 GM_xmlhttpRequest 传输与 x-opencode-session 头', /GM_xmlhttpRequest/.test(code) && /x-opencode-session/.test(code), '');
+    const maxTokens = (code.match(/llmMaxTokens:\s*(\d+)/) || [])[1];
+    check('F5-2 maxTokens 不低于 1024（防推理模型空响应）', !!maxTokens && Number(maxTokens) >= 1024, 'llmMaxTokens=' + maxTokens);
     check('F5-2 存在互动弹窗检测与暂停跳转逻辑', /_findInteractionDialog/.test(code) && /_interactionBlocked/.test(code), '');
+    const urls = [...new Set([...code.matchAll(/https?:\/\/[^'"\s)]+/g)].map((m) => m[0]))];
+    check('F5-2 外部 URL 仅 jQuery CDN 与已声明的 LLM 端点', urls.length === 0 || urls.every((u) => u.indexOf('code.jquery.com') >= 0 || u.indexOf('opencode.ai/zen/go/v1/chat/completions') >= 0), JSON.stringify(urls));
+});
+
+test('F5-3 显式开启 LLM：会话头稳定、严格解析 JSON、按答案点选并可选自动提交（零真实网络）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'], ['2.1'])) + QUIZ_HTML });
+    const doc = env.window.document;
+    let optionClicks = 0;
+    let submitClicks = 0;
+    doc.getElementById('quiz-options').addEventListener('click', () => { optionClicks++; });
+    doc.getElementById('quiz-submit').addEventListener('click', () => { submitClicks++; });
+    const app = await env.boot();
+    await env.advance(2000);
+    check('F5-3 默认配置下先进入人工暂停态', app._interactionBlocked === true, 'blocked=' + app._interactionBlocked);
+    app._interactionBlocked = false;
+    app.configs.llmEnabled = true;
+    app.configs.llmAutoSubmit = true;
+    app.setLlmKey('sk-test-not-a-real-key');
+    const requests = [];
+    app.setLlmTransport((opts) => {
+        requests.push(opts);
+        opts.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"B"}' } }], usage: {} }));
+        return { abort() {} };
+    });
+    await env.advance(3000);
+    check('F5-3 仅发起一次 LLM 请求（同一弹窗去重）', requests.length === 1, 'requests=' + requests.length);
+    const headers = requests[0] ? requests[0].headers : {};
+    check('F5-3 请求头携带 x-opencode-session', !!headers['x-opencode-session'], JSON.stringify(Object.keys(headers)));
+    check('F5-3 会话 ID 稳定且非空', typeof headers['x-opencode-session'] === 'string' && headers['x-opencode-session'].length >= 8, String(headers['x-opencode-session']));
+    check('F5-3 Authorization 使用内存中的 Key', String(headers['Authorization'] || '').indexOf('sk-test-not-a-real-key') >= 0, String(headers['Authorization'] || '').slice(0, 12));
+    check('F5-3 题面进入提示词', String(requests[0] ? requests[0].data : '').indexOf('请选择你认为正确的选项') >= 0, '');
+    check('F5-3 按模型答案选择 B 而非盲选第一个', optionClicks >= 1 && env.xt.has('已选择答案 B'), 'option=' + optionClicks + ' logs=' + env.xt.logs.slice(-3).map((l) => l.text).join(' | '));
+    await env.advance(3000);
+    check('F5-3 自动提交按钮已点击', submitClicks >= 1, 'submit=' + submitClicks);
+    check('F5-3 全程未进入人工暂停态', app._interactionBlocked === false, 'blocked=' + app._interactionBlocked);
+    check('F5-3 真实网络计数为零（仅走注入传输）', env.window.__clock && true, 'transport=injected');
 });
 
 // ---------------------------------------------------------------------------
@@ -1082,11 +1171,11 @@ test('修复点注释齐全，可回溯到具体 issue 编号', () => {
     check('F4 注释说明移除 mouseout/mouseleave 劫持', /F4（#[^）]*）[^\n]*mouseleave\/mouseout|mouseleave\/mouseout/.test(code), '');
 });
 
-test('V3.4 版本标识与构建脚本一致', () => {
+test('V3.5 版本标识与构建脚本一致', () => {
     const code = readFileSync(sourcePath, 'utf8');
     const build = readFileSync(resolve(repoRoot, 'scripts/build-userscript.mjs'), 'utf8');
-    check('源码声明 V3.4', /const VERSION = 'V3\.4'/.test(code), '');
-    check('构建脚本 @version 为 3.4.0', /@version\s+3\.4\.0/.test(build), '');
+    check('源码声明 V3.5', /const VERSION = 'V3\.5'/.test(code), '');
+    check('构建脚本 @version 为 3.5.0', /@version\s+3\.5\.0/.test(build), '');
 });
 
 test('F8 xuexitong.js（V1）入口点击已加固，不再有未保护的 querySelector(...).click()（#14 #15 #16 #17 #18）', () => {
@@ -1138,7 +1227,7 @@ async function main() {
         process.exitCode = 1;
         return;
     }
-    console.log('V3.4 回归测试全部通过（F1-F8）。');
+    console.log('V3.5 回归测试全部通过（F1-F10）。');
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

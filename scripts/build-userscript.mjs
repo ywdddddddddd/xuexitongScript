@@ -5,16 +5,17 @@ import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const source = readFileSync(resolve(root, 'v3_optimized.js'), 'utf8').replace(/^\uFEFF/, '');
 const metadata = `// ==UserScript==
-// @name         学习通自动刷课脚本 V3.4 稳定版
+// @name         学习通自动刷课脚本 V3.5
 // @namespace    local.codex.xuexitong
-// @version      3.4.0
-// @description  自动播放、自动切换下一小节；修复导航死锁、小节内多视频、无视频节点卡死、异常暂停风控、互动题弹窗与视频元素发现（详见 README 与 docs/CHANGELOG-v3.4.md）
+// @version      3.5.0
+// @description  自动播放、自动切换下一小节；V3.5 新增 GUI 监控面板与可选 LLM 互动题应答（默认关闭）；沿用 V3.4 的导航/播放/风控修复（详见 README）
 // @author       Codex
 // @match        *://mooc1.chaoxing.com/mycourse/studentstudy*
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
 // @match        *://*.chaoxing.com/mooc2-ans/mycourse/studentstudy*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      opencode.ai
 // ==/UserScript==
 
 `;

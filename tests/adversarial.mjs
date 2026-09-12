@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * V3.4 对抗性验证套件（独立验证者视角：优先证伪，而不是背书）
+ * V3.5 对抗性验证套件（独立验证者视角：优先证伪，而不是背书）
  *
  * 运行：cd repo && node tests/adversarial.mjs
  * 环境：jsdom + 真实 jQuery 3.7.1（repo/node_modules -> tools/node_modules），不加载任何外部资源（离线）。
@@ -442,7 +442,7 @@ await test('A3 每个修复点都有「F编号 + #issue」注释', ({ note }) =>
   note('F1..F7 均命中 /F{n}.+#issue/ 注释');
 });
 
-await test('A4 负向静态扫描：无事件劫持、无自动答题、无外部网络调用', ({ note }) => {
+await test('A4 负向静态扫描：无事件劫持、无 fetch/XHR 直连、默认零网络（LLM 仅显式开启）', ({ note }) => {
   const forbidden = [
     ['_bindPageGuards（已被移除的全局守卫）', /_bindPageGuards/],
     ['mouseleave', /mouseleave/],
@@ -469,12 +469,12 @@ await test('A4 负向静态扫描：无事件劫持、无自动答题、无外�
   }
   assertEq(hits, [], '去注释源码中仍存在被禁止的写法');
   const urls = Array.from(new Set((CODE.match(/https?:\/\/[^\s'"`)>]+/g) || []).map((s) => s.replace(/[;,)]+$/, ''))));
-  assertEq(urls, ['https://code.jquery.com/jquery-3.6.0.min.js'], '存在 jQuery CDN 之外的外部 URL');
+  assertEq(urls, ['https://code.jquery.com/jquery-3.6.0.min.js', 'https://opencode.ai/zen/go/v1/chat/completions'], '存在除 jQuery CDN 与已声明 LLM 端点之外的外部 URL');
   note(`17 类禁止写法全部 0 命中；去注释源码内外域 URL 仅 ${JSON.stringify(urls)}`);
 });
 
 await test('A5 F5 正向：互动弹窗检测存在，且检测函数体内无任何点击/提交动作', ({ note }) => {
-  for (const symbol of ['_findInteractionDialog', '_checkInteractionDialog', '_interactionBlocked', '不会自动答题', '请手动完成该互动题']) {
+  for (const symbol of ['_findInteractionDialog', '_checkInteractionDialog', '_interactionBlocked', '不会自动答题', '请手动完成该互动题', '_blockInteractionForManual', 'llmEnabled', 'GM_xmlhttpRequest']) {
     assert(SOURCE.includes(symbol), `缺少 F5 符号: ${symbol}`);
   }
   for (const header of ['_findInteractionDialog(rootDoc, depth) {', '_checkInteractionDialog() {']) {
@@ -484,8 +484,14 @@ await test('A5 F5 正向：互动弹窗检测存在，且检测函数体内无�
     assert(!/dispatchEvent/.test(body), `${header} 函数体内出现 dispatchEvent`);
     assert(!/\.submit\s*\(/.test(body), `${header} 函数体内出现 .submit(`);
   }
+  for (const header of ['_maybeSuggestChapterTest() {', '_askChapterTestQuestions(queue, index) {', '_collectChapterTestQuestions() {']) {
+    const body = stripComments(extractMethodBody(SOURCE, header));
+    assert(body.length > 40, header + ' 未定位到章节测验建议函数体');
+    assert(!/\.click\s*\(/.test(body), header + ' 函数体内出现 .click(（章节测验必须人工确认）');
+  }
+  assert(/llmAutoSubmit:\s*false/.test(SOURCE), '缺少 llmAutoSubmit: false 保守默认值（默认不自动提交）');
   const optionSelectorUses = (CODE.match(/input\[type=radio\]/g) || []).length;
-  note(`F5 符号齐备；两个检测函数体内 0 次 click/dispatchEvent/submit；选项选择器仅用于计数（出现 ${optionSelectorUses} 次）`);
+  note(`F5 符号齐备；两个检测函数体内 0 次 click/dispatchEvent/submit；章节测验建议函数体内 0 次 click；选项选择器仅用于计数（出现 ${optionSelectorUses} 次）`);
 });
 
 await test('A6 F6 正向：选择器覆盖 + 嵌套深度上限', ({ note }) => {
@@ -510,13 +516,18 @@ await test('A8 README 默认配置与运行中的 app.configs 逐项一致', asy
   const env = createEnv({ html: pageHTML(threeLeafTree()) });
   const app = await boot(env);
   const block = md.split('```javascript')[1].split('```')[0];
-  const pairs = block.trim().split('\n').map((l) => l.split(':').map((s) => s.trim())).filter((p) => p.length === 2);
+  const pairs = [...block.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,\n]+?),?\s*$/gm)].map((m) => [m[1], m[2].trim()]);
   assert(pairs.length >= 10, `README 配置块解析异常（${pairs.length} 项）`);
+  const parseValue = (raw) => {
+    if (raw === 'true') return true;
+    if (raw === 'false') return false;
+    if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+    return raw.replace(/^['"]|['"]$/g, '');
+  };
   const mismatches = [];
   for (const [key, raw] of pairs) {
     if (!(key in app.configs)) { mismatches.push(`${key} 在 app.configs 中不存在`); continue; }
-    const expected = raw === 'true' ? true : raw === 'false' ? false : (raw !== '' && !Number.isNaN(Number(raw)) ? Number(raw) : raw);
-    if (JSON.stringify(app.configs[key]) !== JSON.stringify(expected)) {
+    if (JSON.stringify(app.configs[key]) !== JSON.stringify(parseValue(raw))) {
       mismatches.push(`${key}: README=${raw} 代码=${JSON.stringify(app.configs[key])}`);
     }
   }
@@ -1098,7 +1109,7 @@ await test('H2 重复 run() 不叠加定时器/不重复点击', async ({ note }
   for (let i = 0; i < 3; i++) { app.run(); await sleep(40); }
   assertEq(env.pendingIntervals().length, intervals1, `重复 run() 后活动 interval 从 ${intervals1} 变为 ${env.pendingIntervals().length}`);
   assert(app._checkInterval !== null && app._interactionWatcher !== null, 'H2: run() 后监控定时器缺失');
-  assertEq(env.count('=== 学习通自动刷课脚本 V3.4 启动 ==='), 4, 'H2: 启动日志次数应等于 run() 调用次数');
+  assertEq(env.count('=== 学习通自动刷课脚本 V3.5 启动 ==='), 4, 'H2: 启动日志次数应等于 run() 调用次数');
   assertEq(env.navTitles(), [], 'H2: 重复 run() 造成额外点击');
   note(`活动 interval 数在 1 次与 4 次 run() 后均为 ${intervals1}；启动日志=4；额外点击=0`);
   await close(env);
@@ -1140,10 +1151,10 @@ group('I. initializePlayer 二次调用可达性 / 自动跳转定时器竞态')
 await test('I1 单次 eval 内 initializePlayer() 不可达第二次（静态+动态证据）', async ({ note }) => {
   const env = createEnv({ html: pageHTML(threeLeafTree()) });
   const app = await boot(env);
-  const bootLogs1 = env.count('=== 学习通自动刷课脚本 V3.4 启动 ===');
+  const bootLogs1 = env.count('=== 学习通自动刷课脚本 V3.5 启动 ===');
   assertEq(bootLogs1, 1, 'I1: 单次 eval 后初始化次数应为 1');
   await sleep(150);
-  assertEq(env.count('=== 学习通自动刷课脚本 V3.4 启动 ==='), 1, 'I1: boot 定时器在初始化之后再次初始化');
+  assertEq(env.count('=== 学习通自动刷课脚本 V3.5 启动 ==='), 1, 'I1: boot 定时器在初始化之后再次初始化');
   assertEq(env.window.__xuexitongPlayerV3BootTimer, null, 'I1: boot 定时器句柄未置空（可能二次触发）');
   assertEq(env.pendingIntervals().filter((t) => t.nth === 1).length, 0, 'I1: boot interval 仍在活动');
   assert(env.window.app === env.window.__xuexitongPlayerV3, 'I1: window.app 与 APP_KEY 指向不同实例');
@@ -1155,7 +1166,7 @@ await test('I1 单次 eval 内 initializePlayer() 不可达第二次（静态+�
   const second = env.window.__xuexitongPlayerV3;
   assert(second && second !== firstApp, 'I1: 二次粘贴未创建新实例');
   assertEq([firstApp._checkInterval, firstApp._interactionWatcher, firstApp._nextUnitPending], [null, null, false], 'I1: 前一实例未被 destroy 干净');
-  assertEq(env.count('=== 学习通自动刷课脚本 V3.4 启动 ==='), 2, 'I1: 初始化次数应为 2（两次 eval）');
+  assertEq(env.count('=== 学习通自动刷课脚本 V3.5 启动 ==='), 2, 'I1: 初始化次数应为 2（两次 eval）');
   assert(env.pendingIntervals().length <= 2, `I1: interval 叠加到 ${env.pendingIntervals().length} 个`);
   note(`单次 eval 内 initializePlayer 只发生 1 次；boot 句柄置空、interval 停止；二次 eval 会先 destroy 旧实例（旧实例定时器/监听器全清）`);
   await close(env);
