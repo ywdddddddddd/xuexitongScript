@@ -942,6 +942,21 @@ test('F12-1 片尾停滞保护：已播放≥90%且平台已标记完成 → 直
     app._checkVideoStatus();
     check('F12-1 未达到 90% 不触发', endedCalls === 0, 'calls=' + endedCalls);
 });
+test('F16-1 后台保活：隐藏状态下被暂停的视频直接在后台续播（无需恢复可见）', async () => {
+    const { env, video } = await envWithTree(chapterSpecs(['1.1']), { stepTitle: '视频' });
+    const app = await env.boot();
+    await env.advance(1500);
+    app._isPlaying = true;
+    app._userPaused = false;
+    app._clearCheckInterval(); // 隔离：停掉普通视频监控，只验证后台保活链
+    Object.defineProperty(env.window.document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    app._startHiddenKeepAlive();
+    video.__state.paused = true;
+    await env.advance(6000);
+    check('F16-1 后台保活已触发续播', app._hiddenResumeCount >= 1 && env.xt.has('已在后台直接续播'), 'count=' + app._hiddenResumeCount);
+    check('F16-1 视频已恢复播放', video.paused === false, 'paused=' + video.paused);
+    app._stopHiddenKeepAlive();
+});
 test('F15-1 防挂机暂停拦截：无用户意图的 pause 被拦、用户点击后的 pause 放行', async () => {
     const { env, video } = await envWithTree(chapterSpecs(['1.1']), { stepTitle: '视频' });
     const app = await env.boot();

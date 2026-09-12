@@ -409,9 +409,11 @@
                     try {
                         if (typeof document === 'undefined') return;
                         if (document.visibilityState !== 'visible') {
-                            console.log('%c页面进入后台（visibility=hidden）：视频可能被浏览器省电暂停，恢复可见后脚本会自动续播', 'color:#FF9800');
+                            console.log('%c页面进入后台（visibility=hidden）：已启用后台保活，被暂停会直接续播（无需恢复可见）', 'color:#FF9800');
+                            this._startHiddenKeepAlive();
                             return;
                         }
+                        this._stopHiddenKeepAlive();
                         if (this._resumeAttemptsThisUnit > 0 || this._resumeCapLogged) {
                             console.log('%c页面恢复可见：重置保活预算（原已达上限），尝试续播', 'color:#4CAF50');
                             this._resumeAttemptsThisUnit = 0;
@@ -426,7 +428,35 @@
                 document.addEventListener('visibilitychange', this._visibilityHandler);
                 window.addEventListener('focus', this._visibilityHandler);
             },
+            // F16（V3.6）：后台保活 —— 页面隐藏时若视频被浏览器省电暂停，直接在后台 play() 拉起，
+            // 不需要等页面恢复可见（真机实测：hidden 状态下 play() 可正常生效）。使用 _schedule 链避免新增 setInterval。
+            _startHiddenKeepAlive() {
+                if (this._hiddenKeepAliveActive) return;
+                this._hiddenKeepAliveActive = true;
+                const tick = () => {
+                    if (!this._hiddenKeepAliveActive) return;
+                    try {
+                        if (typeof document !== 'undefined' && document.visibilityState === 'visible') { this._hiddenKeepAliveActive = false; return; }
+                        if (this._isPlaying && !this._userPaused) {
+                            const v = this._getVideoEl();
+                            if (v && v.paused) {
+                                this._hiddenResumeCount++;
+                                if (this._hiddenResumeCount <= 3 || this._hiddenResumeCount % 20 === 0) {
+                                    console.log('%c[后台保活] 页面隐藏且视频被暂停：已在后台直接续播（第 ' + this._hiddenResumeCount + ' 次）', 'color:#4CAF50');
+                                }
+                                try { v.play().catch(() => {}); } catch (e) { /* ignore */ }
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                    if (this._hiddenKeepAliveActive) this._schedule(tick, 3000);
+                };
+                this._schedule(tick, 3000);
+            },
+            _stopHiddenKeepAlive() {
+                this._hiddenKeepAliveActive = false;
+            },
             _unbindVisibilityRecovery() {
+                this._stopHiddenKeepAlive();
                 if (!this._visibilityBound) return;
                 this._visibilityBound = false;
                 try { document.removeEventListener('visibilitychange', this._visibilityHandler); } catch (e) { /* ignore */ }
@@ -682,6 +712,8 @@
             _guardLastResumeTs: 0,
             _progressStreakStart: 0,
             _pauseGuardBlocked: 0,
+            _hiddenKeepAliveActive: false,
+            _hiddenResumeCount: 0,
             _guardProbeTimer: null,
             _seekBackTimesThisUnit: 0,
             _seekBackCapLogged: false,
