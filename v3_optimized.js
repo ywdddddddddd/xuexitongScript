@@ -2659,10 +2659,21 @@
                     // F17：先收集选项与编辑器，再判题型 —— 「有编辑器且无选项」一律按写作题处理
                     // （真机演练：资料题【资料题】被误判为选择题导致「无法匹配选项」而停止）。
                     let optionEls = [];
-                    try { optionEls = Array.from(timu.querySelectorAll('.Zy_ulTop li, .Zy_ulTk li')).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() })); } catch (e) { optionEls = []; }
+                    try {
+                        optionEls = Array.from(timu.querySelectorAll('.Zy_ulTop li, .Zy_ulTk li')).filter((li) => {
+                            // F18：排除编辑器外壳（含 UEditor/textarea/iframe 的 li 不是选项）。
+                            // 真机教训：把编辑器外壳当选项点击 → 提交空值。
+                            try { if (li.querySelector('.edui-editor, textarea, iframe, [class*="edui"]')) return false; } catch (e) { /* ignore */ }
+                            const t = (li.textContent || '').replace(/\s+/g, ' ').trim();
+                            if (!t || t.length > 200) return false;
+                            try { if (li.querySelector('input[type=radio], input[type=checkbox]')) return true; } catch (e) { /* ignore */ }
+                            return /^([A-H][、.．:：\s]|(对|错|正确|错误)\s*$)/.test(t);
+                        }).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() }));
+                    } catch (e) { optionEls = []; }
                     let editorCount = 0;
                     try { editorCount = timu.querySelectorAll('.edui-editor').length; } catch (e) { editorCount = 0; }
-                    const isShortAnswer = (optionEls.length === 0 && editorCount > 0) || /简答|论述|分析|写作|资料/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0;
+                    // F18：过滤后没有真选项 → 一律按写作题处理（不再依赖题型标签，覆盖案例/讨论/资料等所有变体）。
+                    const isShortAnswer = optionEls.length === 0 || /简答|论述|分析|写作|资料|案例|讨论/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0;
                     out.push({ typeLabel: typeLabel, typeCode: typeCode, rawText: rawText, answerId: answerId, textarea: textarea, isShortAnswer: isShortAnswer, optionEls: optionEls, editorCount: editorCount });
                 });
                 return out;
@@ -2722,6 +2733,39 @@
                     if (!ue.instants[wantKey]) ue.instants[wantKey] = editor;
                     return true;
                 } catch (e) { return false; }
+            },
+            // F18：提交前空值守卫——统计题目的有效作答（写作题看编辑器正文，选择题看是否有选中项）。
+            _workHasAnswer(quiz, questions) {
+                let filled = 0;
+                for (const q of questions) {
+                    if (q.isShortAnswer) {
+                        let text = '';
+                        try {
+                            const ue = quiz.win && quiz.win.UE;
+                            const wantKey = 'answer' + q.answerId;
+                            let ed = null;
+                            if (ue && ue.instants) {
+                                for (const k of Object.keys(ue.instants)) {
+                                    const c = ue.instants[k];
+                                    if (c && c.textarea && String(c.textarea.id) === wantKey) { ed = c; break; }
+                                }
+                                if (!ed && ue.instants[wantKey]) ed = ue.instants[wantKey];
+                            }
+                            if (ed && typeof ed.getContent === 'function') text = ed.getContent();
+                            else if (q.textarea) text = q.textarea.value;
+                        } catch (e) { text = ''; }
+                        if (String(text || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0) filled++;
+                    } else {
+                        let checked = false;
+                        try {
+                            checked = q.optionEls.some((o) => {
+                                try { return !!o.el.querySelector('input:checked'); } catch (e) { return false; }
+                            });
+                        } catch (e) { checked = false; }
+                        if (checked) filled++;
+                    }
+                }
+                return filled;
             },
             _workLooksSubmitted(work) {
                 // 任务点标记可能延迟：工作页出现「待批阅/已完成/已提交」也算提交成功（真机演练：待批阅 + ans-job-finished 延迟）。
@@ -2815,6 +2859,10 @@
                     };
                     const askNext = (qi) => {
                         if (qi >= questions.length) {
+                            // F18：提交前校验——没有任何有效答案时拒绝提交（防止空值入库）。
+                            const filledCount = this._workHasAnswer(quiz, questions);
+                            if (!filledCount) { giveUp('未检测到任何有效答案，已拦截空值提交'); return; }
+                            console.log('%c[作业] 提交前校验通过（有效作答 ' + filledCount + '/' + questions.length + ' 题）', 'color:#4CAF50');
                             this._submitWork(quiz.win, document, (ok, msg) => {
                                 if (!ok) { giveUp(msg); return; }
                                 const waitDone = (left) => {
@@ -2830,7 +2878,9 @@
                             return;
                         }
                         const q = questions[qi];
-                        const rawQuestion = texts[qi] || q.rawText || String(work.title || '');
+                        // F18：优先使用真实题目文本（rawText），仅在过短/缺失时退回作业标题。
+                        // 真机教训：此前误把作业标题当题干 → LLM 回答"题目信息不足"。
+                        const rawQuestion = (q.rawText && q.rawText.replace(/\s+/g, '').length >= 10) ? q.rawText : (texts[qi] || q.rawText || String(work.title || ''));
                         const rawOptions = q.optionEls.map((o) => o.text);
                         // F17：先解密 font-cxsecret 混淆文本（题干 + 选项），再交给 LLM 作答/匹配。
                         this._cxSecretDecode([rawQuestion].concat(rawOptions), (decoded) => {

@@ -962,9 +962,13 @@ test('F17-1 资料题判定修复（有编辑器无选项→写作题）+ 字体
     const app = await env.boot();
     const doc = env.window.document;
     doc.getElementById('quiz').innerHTML = '<div class="TiMu"><div class="Zy_TItle"><span class="newZy_TItle">【资料题】</span>案例：患者男性，80岁……</div>'
-        + '<div class="edui-editor"></div><textarea id="answer405825412"></textarea></div>';
+        + '<ul class="Zy_ulTk"><li><span>填写答案</span><div class="edui-editor"></div><textarea id="answer405825412"></textarea></li></ul></div>';
     const list = app._workQuestionList(doc);
     check('F17-1 资料题（有编辑器无选项）判定为写作题', list.length === 1 && list[0].isShortAnswer === true, JSON.stringify(list.map((x) => ({ t: x.typeLabel, sa: x.isShortAnswer, ops: x.optionEls.length, ed: x.editorCount }))));
+    check('F18-1 编辑器外壳 li 不再被当成选项', list.length === 1 && list[0].optionEls.length === 0, 'ops=' + (list[0] ? list[0].optionEls.length : -1));
+    check('F18-1 空编辑器 → 有效作答 0（拦截空值提交）', app._workHasAnswer({ win: env.window }, list) === 0, '');
+    const fakeWin = { UE: { instants: { answer405825412: { textarea: { id: 'answer405825412' }, getContent: () => '<p>有答案内容</p>' } } } };
+    check('F18-1 有内容 → 有效作答 1', app._workHasAnswer({ win: fakeWin }, list) === 1, '');
     let decoded = null;
     app._cxSecretDecode(['测试文本'], (t) => { decoded = t; });
     check('F17-1 无字体/Canvas 环境优雅降级', Array.isArray(decoded) && decoded[0] === '测试文本', JSON.stringify(decoded));
