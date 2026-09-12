@@ -1,5 +1,5 @@
 (function () {
-    // 学习通自动刷课脚本 V3.5 —— 唯一源码（油猴版 v3_optimized.user.js 由 scripts/build-userscript.mjs 生成）
+    // 学习通自动刷课脚本 V3.6 —— 唯一源码（油猴版 v3_optimized.user.js 由 scripts/build-userscript.mjs 生成）
     //
     // 本版在 V3.3（master）基础上，针对线上 55 条反馈里最高频的六类缺陷做收敛式修复。
     // 每条修复都用「F编号（#issue 编号）」注释标注依据，便于回溯到具体反馈：
@@ -19,7 +19,7 @@
     //   * 密钥只保存在内存（GUI 面板录入 / app.setLlmKey），不写入 localStorage、不落盘、不进仓库；
     //   * 默认配置下全脚本零外部网络请求；仅当显式开启 LLM 后才会访问 llmEndpoint；
     //   * LLM 请求只发送题干与选项文本，不发送 cookie、账号或页面地址等凭据信息。
-    const VERSION = 'V3.5';
+    const VERSION = 'V3.6';
     const APP_KEY = '__xuexitongPlayerV3';
     const BOOT_TIMER_KEY = '__xuexitongPlayerV3BootTimer';
     const previousApp = window[APP_KEY];

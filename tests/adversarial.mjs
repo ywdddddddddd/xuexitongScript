@@ -1109,7 +1109,7 @@ await test('H2 重复 run() 不叠加定时器/不重复点击', async ({ note }
   for (let i = 0; i < 3; i++) { app.run(); await sleep(40); }
   assertEq(env.pendingIntervals().length, intervals1, `重复 run() 后活动 interval 从 ${intervals1} 变为 ${env.pendingIntervals().length}`);
   assert(app._checkInterval !== null && app._interactionWatcher !== null, 'H2: run() 后监控定时器缺失');
-  assertEq(env.count('=== 学习通自动刷课脚本 V3.5 启动 ==='), 4, 'H2: 启动日志次数应等于 run() 调用次数');
+  assertEq(env.count('=== 学习通自动刷课脚本 V3.6 启动 ==='), 4, 'H2: 启动日志次数应等于 run() 调用次数');
   assertEq(env.navTitles(), [], 'H2: 重复 run() 造成额外点击');
   note(`活动 interval 数在 1 次与 4 次 run() 后均为 ${intervals1}；启动日志=4；额外点击=0`);
   await close(env);
@@ -1151,10 +1151,10 @@ group('I. initializePlayer 二次调用可达性 / 自动跳转定时器竞态')
 await test('I1 单次 eval 内 initializePlayer() 不可达第二次（静态+动态证据）', async ({ note }) => {
   const env = createEnv({ html: pageHTML(threeLeafTree()) });
   const app = await boot(env);
-  const bootLogs1 = env.count('=== 学习通自动刷课脚本 V3.5 启动 ===');
+  const bootLogs1 = env.count('=== 学习通自动刷课脚本 V3.6 启动 ===');
   assertEq(bootLogs1, 1, 'I1: 单次 eval 后初始化次数应为 1');
   await sleep(150);
-  assertEq(env.count('=== 学习通自动刷课脚本 V3.5 启动 ==='), 1, 'I1: boot 定时器在初始化之后再次初始化');
+  assertEq(env.count('=== 学习通自动刷课脚本 V3.6 启动 ==='), 1, 'I1: boot 定时器在初始化之后再次初始化');
   assertEq(env.window.__xuexitongPlayerV3BootTimer, null, 'I1: boot 定时器句柄未置空（可能二次触发）');
   assertEq(env.pendingIntervals().filter((t) => t.nth === 1).length, 0, 'I1: boot interval 仍在活动');
   assert(env.window.app === env.window.__xuexitongPlayerV3, 'I1: window.app 与 APP_KEY 指向不同实例');
@@ -1166,7 +1166,7 @@ await test('I1 单次 eval 内 initializePlayer() 不可达第二次（静态+�
   const second = env.window.__xuexitongPlayerV3;
   assert(second && second !== firstApp, 'I1: 二次粘贴未创建新实例');
   assertEq([firstApp._checkInterval, firstApp._interactionWatcher, firstApp._nextUnitPending], [null, null, false], 'I1: 前一实例未被 destroy 干净');
-  assertEq(env.count('=== 学习通自动刷课脚本 V3.5 启动 ==='), 2, 'I1: 初始化次数应为 2（两次 eval）');
+  assertEq(env.count('=== 学习通自动刷课脚本 V3.6 启动 ==='), 2, 'I1: 初始化次数应为 2（两次 eval）');
   assert(env.pendingIntervals().length <= 2, `I1: interval 叠加到 ${env.pendingIntervals().length} 个`);
   note(`单次 eval 内 initializePlayer 只发生 1 次；boot 句柄置空、interval 停止；二次 eval 会先 destroy 旧实例（旧实例定时器/监听器全清）`);
   await close(env);

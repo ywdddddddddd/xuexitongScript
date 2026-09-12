@@ -1183,11 +1183,11 @@ test('修复点注释齐全，可回溯到具体 issue 编号', () => {
     check('F4 注释说明移除 mouseout/mouseleave 劫持', /F4（#[^）]*）[^\n]*mouseleave\/mouseout|mouseleave\/mouseout/.test(code), '');
 });
 
-test('V3.5 版本标识与构建脚本一致', () => {
+test('V3.6 版本标识与构建脚本一致', () => {
     const code = readFileSync(sourcePath, 'utf8');
     const build = readFileSync(resolve(repoRoot, 'scripts/build-userscript.mjs'), 'utf8');
-    check('源码声明 V3.5', /const VERSION = 'V3\.5'/.test(code), '');
-    check('构建脚本 @version 为 3.5.0', /@version\s+3\.5\.0/.test(build), '');
+    check('源码声明 V3.6', /const VERSION = 'V3\.6'/.test(code), '');
+    check('构建脚本 @version 为 3.6.0', /@version\s+3\.6\.0/.test(build), '');
 });
 
 test('F8 xuexitong.js（V1）入口点击已加固，不再有未保护的 querySelector(...).click()（#14 #15 #16 #17 #18）', () => {
@@ -1239,7 +1239,7 @@ async function main() {
         process.exitCode = 1;
         return;
     }
-    console.log('V3.5 回归测试全部通过（F1-F10）。');
+    console.log('V3.6 回归测试全部通过（F1-F11）。');
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

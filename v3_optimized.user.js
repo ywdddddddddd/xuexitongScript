@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         学习通自动刷课脚本 V3.5
+// @name         学习通自动刷课脚本 V3.6
 // @namespace    local.codex.xuexitong
-// @version      3.5.0
-// @description  自动播放、自动切换下一小节；V3.5 新增 GUI 监控面板与可选 LLM 互动题应答（默认关闭）；沿用 V3.4 的导航/播放/风控修复（详见 README）
+// @version      3.6.0
+// @description  自动播放、自动切换下一小节；V3.6 内嵌章节测验自动作答（默认关闭，绝不跳过）；V3.5 GUI 面板与互动题应答；沿用 V3.4 导航/播放/风控修复（详见 README）
 // @author       Codex
 // @match        *://mooc1.chaoxing.com/mycourse/studentstudy*
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -13,7 +13,7 @@
 // ==/UserScript==
 
 (function () {
-    // 学习通自动刷课脚本 V3.5 —— 唯一源码（油猴版 v3_optimized.user.js 由 scripts/build-userscript.mjs 生成）
+    // 学习通自动刷课脚本 V3.6 —— 唯一源码（油猴版 v3_optimized.user.js 由 scripts/build-userscript.mjs 生成）
     //
     // 本版在 V3.3（master）基础上，针对线上 55 条反馈里最高频的六类缺陷做收敛式修复。
     // 每条修复都用「F编号（#issue 编号）」注释标注依据，便于回溯到具体反馈：
@@ -33,7 +33,7 @@
     //   * 密钥只保存在内存（GUI 面板录入 / app.setLlmKey），不写入 localStorage、不落盘、不进仓库；
     //   * 默认配置下全脚本零外部网络请求；仅当显式开启 LLM 后才会访问 llmEndpoint；
     //   * LLM 请求只发送题干与选项文本，不发送 cookie、账号或页面地址等凭据信息。
-    const VERSION = 'V3.5';
+    const VERSION = 'V3.6';
     const APP_KEY = '__xuexitongPlayerV3';
     const BOOT_TIMER_KEY = '__xuexitongPlayerV3BootTimer';
     const previousApp = window[APP_KEY];
