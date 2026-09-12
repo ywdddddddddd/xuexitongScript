@@ -1828,10 +1828,17 @@
             },
             _guiFormatArgs(args) {
                 const parts = [];
+                const isStyle = (v) => typeof v === 'string' && /^(color|font|background|border|text-)/i.test(v.trim());
                 for (let i = 0; i < args.length; i++) {
                     const a = args[i];
                     if (a === '%c') { i++; continue; }
-                    if (typeof a === 'string') { parts.push(a.replace(/%c/g, '')); continue; }
+                    if (typeof a === 'string') {
+                        const hasC = a.indexOf('%c') >= 0;
+                        parts.push(a.replace(/%c/g, ''));
+                        // console.log('%cxxx', 'style') 的样式参数要连同 %c 一起丢弃，避免污染面板日志。
+                        if (hasC && isStyle(args[i + 1])) i++;
+                        continue;
+                    }
                     if (a && a.name && a.message && a.stack) { parts.push(a.name + ': ' + a.message); continue; }
                     try { parts.push(typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a)); } catch (e) { parts.push(String(a)); }
                 }
