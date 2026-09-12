@@ -121,8 +121,10 @@
                 // F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭；开启后自动滚动文档到底部并等待平台标记完成。
                 docTaskScroll: false,
                 docTaskScrollStepMs: 800,
-                docTaskMaxSteps: 60,
-                docTaskWaitMs: 20000,
+                // F13 修正：懒加载文档越滚越长，步数上限会误判「到底」；改为时间上限 + 「到底且高度稳定」双条件。
+                docTaskMaxMs: 240000,
+                docTaskWaitMs: 45000,
+                docTaskAttempts: 2,
                 // F9（V3.5）：GUI 可视化面板。纯本地 DOM，不产生任何额外网络请求。
                 guiEnabled: true,
                 guiMaxLogLines: 60,
@@ -2673,18 +2675,31 @@
                 visit(doc, 0);
                 return best;
             },
-            _scrollDocToEnd(scroller, step, maxSteps, cb) {
-                let i = 0;
+            _scrollDocToEnd(scroller, step, maxMs, cb) {
+                const start = Date.now();
+                let lastHeight = scroller ? (scroller.scrollHeight || 0) : 0;
+                let stableCount = 0;
                 const tick = () => {
                     if (!scroller) { cb(false, '未找到可滚动容器'); return; }
                     try {
-                        const max = scroller.scrollHeight - scroller.clientHeight;
+                        const total = scroller.scrollHeight;
+                        const max = Math.max(0, total - scroller.clientHeight);
                         const next = Math.min(max, (scroller.scrollTop || 0) + step);
                         scroller.scrollTop = next;
                         try { scroller.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (e) { /* ignore */ }
-                        if (next >= max - 5 || i >= maxSteps) { cb(true, ''); return; }
+                        const pos = scroller.scrollTop || 0;
+                        const atBottom = pos + scroller.clientHeight >= scroller.scrollHeight - 5;
+                        if (atBottom) {
+                            // 到底后停留观察：懒加载会让 scrollHeight 继续增长，必须等高度稳定才算真正到底。
+                            if (total > lastHeight + 10) stableCount = 0; else stableCount++;
+                            lastHeight = total;
+                            if (stableCount >= 3) { cb(true, ''); return; }
+                        } else {
+                            stableCount = 0;
+                            lastHeight = total;
+                        }
+                        if (Date.now() - start > Math.max(30000, maxMs)) { cb(atBottom, atBottom ? '' : '超时未滚到底部'); return; }
                     } catch (e) { cb(false, e.message); return; }
-                    i++;
                     this._schedule(tick, Math.max(200, Number(this.configs.docTaskScrollStepMs) || 800));
                 };
                 this._schedule(tick, 300);
@@ -2696,21 +2711,33 @@
                 let doc = null;
                 try { doc = docTask.frame.contentDocument; } catch (e) { doc = null; }
                 if (!doc) { done(false, '无法访问文档内容'); return; }
-                const scroller = this._docScroller(doc);
-                if (!scroller) { done(false, '未找到文档滚动容器'); return; }
-                console.log('%c[文档任务] 开始翻阅 ' + String(docTask.jobid).slice(0, 24) + '（高度 ' + scroller.scrollHeight + 'px）', 'color:#2196F3');
-                const step = Math.max(200, Math.floor((scroller.clientHeight || 400) * 0.9));
-                this._scrollDocToEnd(scroller, step, Number(this.configs.docTaskMaxSteps) || 60, (ok, msg) => {
-                    if (!ok) { done(false, '翻阅失败：' + msg); return; }
-                    console.log('%c[文档任务] 已滚动到底部，等待平台标记完成…', 'color:#2196F3');
-                    const wait = (left) => {
-                        const still = this._findDocTaskFrames().filter((d) => !d.finished);
-                        if (!still.length) { done(true, ''); return; }
-                        if (left <= 0) { done(false, '滚动后任务点未标记完成'); return; }
-                        this._schedule(() => wait(left - 1), 2000);
-                    };
-                    this._schedule(() => wait(Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 20000) / 2000))), 1000);
-                });
+                const attempts = Math.max(1, Number(this.configs.docTaskAttempts) || 2);
+                const runAttempt = (left) => {
+                    const scroller = this._docScroller(doc);
+                    if (!scroller) { done(false, '未找到文档滚动容器'); return; }
+                    console.log('%c[文档任务] 开始翻阅 ' + String(docTask.jobid).slice(0, 24) + '（高度 ' + scroller.scrollHeight + 'px，第 ' + (attempts - left + 1) + '/' + attempts + ' 轮）', 'color:#2196F3');
+                    const step = Math.max(200, Math.floor((scroller.clientHeight || 400) * 0.9));
+                    this._scrollDocToEnd(scroller, step, Number(this.configs.docTaskMaxMs) || 240000, (ok, msg) => {
+                        if (!ok) { done(false, '翻阅失败：' + msg); return; }
+                        console.log('%c[文档任务] 本轮翻阅完成（高度 ' + scroller.scrollHeight + 'px），等待平台标记完成…', 'color:#2196F3');
+                        const wait = (leftTicks) => {
+                            const still = this._findDocTaskFrames().filter((d) => !d.finished);
+                            if (!still.length) { done(true, ''); return; }
+                            if (leftTicks <= 0) {
+                                if (left > 1) {
+                                    console.log('%c[文档任务] 尚未标记完成，追加一轮翻阅…', 'color:#FF9800');
+                                    runAttempt(left - 1);
+                                    return;
+                                }
+                                done(false, '滚动后任务点未标记完成');
+                                return;
+                            }
+                            this._schedule(() => wait(leftTicks - 1), 2000);
+                        };
+                        this._schedule(() => wait(Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 45000) / 2000))), 1000);
+                    });
+                };
+                runAttempt(attempts);
             },
             _handleDocTasks() {
                 if (this._docTaskBusy) return true;

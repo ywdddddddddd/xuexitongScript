@@ -62,8 +62,9 @@ videoTaskFrameMaxCount: 12
 videoCompleteRatio: 0.9
 docTaskScroll: false
 docTaskScrollStepMs: 800
-docTaskMaxSteps: 60
-docTaskWaitMs: 20000
+docTaskMaxMs: 240000
+docTaskWaitMs: 45000
+docTaskAttempts: 2
 guiEnabled: true
 guiMaxLogLines: 60
 llmEnabled: false
