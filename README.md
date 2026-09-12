@@ -59,6 +59,7 @@ taskDialogClickCooldownMs: 8000
 taskDialogMaxClicksPerUnit: 3
 videoTaskFrameMaxDepth: 4
 videoTaskFrameMaxCount: 12
+videoCompleteRatio: 0.9
 guiEnabled: true
 guiMaxLogLines: 60
 llmEnabled: false
@@ -94,6 +95,7 @@ llmWorkWaitMs: 45000
 - `llmEmbeddedWork`（默认 **false**，V3.6 新增）：节点内嵌的「章节测验/作业」（work 任务点，如简答题）自动作答：LLM 填写答案后走平台原生提交流程（`btnBlueSubmit` → 确认弹窗 → 任务点标记完成）。**默认关闭时绝不跳过**——检测到未完成内嵌测验会停止自动前进并提示。
 - `llmWorkWaitMs`（默认 45000）：提交后等待任务点标记完成的最长时间；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
+- `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。
 ## 使用方法
 
 ### 方法一：浏览器控制台
