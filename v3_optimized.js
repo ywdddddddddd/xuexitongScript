@@ -252,6 +252,7 @@
                 this._clearCheckInterval();
                 this._bindStepNavigation();
                 this._startInteractionWatcher();
+                this._bindVisibilityRecovery();
                 this._guiInit();
                 this.play();
             },
@@ -381,6 +382,37 @@
                 this._timers.clear();
                 this._delayedNextUnitTimer = null;
                 this._guardProbeTimer = null;
+            },
+            // F14（V3.6）：页面可见性恢复自愈 —— 拖动窗口/切到后台会让 Chrome 省电暂停纯视频媒体，
+            // 拉锯会耗尽「每小节 5 次」保活预算；恢复可见时自动重置预算并续播（真机演练：拖窗后 ct 冻死）。
+            _bindVisibilityRecovery() {
+                if (this._visibilityBound) return;
+                this._visibilityBound = true;
+                this._visibilityHandler = () => {
+                    try {
+                        if (typeof document === 'undefined') return;
+                        if (document.visibilityState !== 'visible') {
+                            console.log('%c页面进入后台（visibility=hidden）：视频可能被浏览器省电暂停，恢复可见后脚本会自动续播', 'color:#FF9800');
+                            return;
+                        }
+                        if (this._resumeAttemptsThisUnit > 0 || this._resumeCapLogged) {
+                            console.log('%c页面恢复可见：重置保活预算（原已达上限），尝试续播', 'color:#4CAF50');
+                            this._resumeAttemptsThisUnit = 0;
+                            this._resumeCapLogged = false;
+                        }
+                        const v = this._getVideoEl();
+                        if (this._isPlaying && v && v.paused && !this._userPaused) {
+                            try { v.play().catch(() => {}); } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore */ }
+                };
+                document.addEventListener('visibilitychange', this._visibilityHandler);
+            },
+            _unbindVisibilityRecovery() {
+                if (!this._visibilityBound) return;
+                this._visibilityBound = false;
+                try { document.removeEventListener('visibilitychange', this._visibilityHandler); } catch (e) { /* ignore */ }
+                this._visibilityHandler = null;
             },
             _startVideoMonitoring() {
                 this._clearCheckInterval();
@@ -2772,6 +2804,7 @@
                 }
                 this._clearCheckInterval();
                 this._stopInteractionWatcher();
+                this._unbindVisibilityRecovery();
                 // F9（V3.5）：移除 GUI 面板并注销 console 镜像，避免脚本重载后面板/监听叠加。
                 this._guiDestroy();
                 // F10（V3.5）：中止在途 LLM 请求，避免 destroy 后回调再操作页面。
