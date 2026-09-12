@@ -61,6 +61,7 @@ videoTaskFrameMaxDepth: 4
 videoTaskFrameMaxCount: 12
 videoCompleteRatio: 0.9
 pauseGuard: true
+cxSecretDecode: true
 docTaskScroll: false
 docTaskScrollStepMs: 800
 docTaskMaxMs: 240000
@@ -103,6 +104,7 @@ llmWorkWaitMs: 90000
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。
 - `pauseGuard`（默认 **true**，V3.6 新增）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停。只拦截「最近 1.5 秒无点击/按键」的暂停调用；用户主动点击暂停仍正常生效。如遇异常可设为 `false` 关闭。
+- `cxSecretDecode`（默认 **true**，V3.6 新增）：自动解密平台的 font-cxsecret 反copy字体（用系统 Noto Sans SC/思源黑体同字形做位图匹配），解密题干与选项后再交给 LLM 作答/匹配；无字体或无 Canvas 环境自动跳过。
 - `docTaskScroll`（默认 **false**，V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）；开启后自动把文档滚动到底部并等待平台标记完成。
 ## 使用方法
 

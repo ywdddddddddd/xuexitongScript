@@ -135,6 +135,8 @@
                 // F15（V3.6）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停（真机实测：window 上 mouseout 监听调用 pause()）。
                 // 只拦截「无用户意图」的暂停；最近 1.5 秒有点击/按键的操作仍正常放行。
                 pauseGuard: true,
+                // F17（V3.6）：font-cxsecret 反copy字体自动解密（用系统 Noto Sans SC 做字形匹配）。
+                cxSecretDecode: true,
                 // F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭；开启后自动滚动文档到底部并等待平台标记完成。
                 docTaskScroll: false,
                 docTaskScrollStepMs: 800,
@@ -714,6 +716,9 @@
             _pauseGuardBlocked: 0,
             _hiddenKeepAliveActive: false,
             _hiddenResumeCount: 0,
+            _cxFontB64: '',
+            _cxFontLoaded: false,
+            _cxSecretMap: null,
             _guardProbeTimer: null,
             _seekBackTimesThisUnit: 0,
             _seekBackCapLogged: false,
@@ -2522,6 +2527,133 @@
                 } catch (e) { /* ignore */ }
                 return null;
             },
+            // ================= F17（V3.6）：font-cxsecret 字形解密 =================
+            // 原理：平台用「思源黑体子集」做反copy字体（乱码 codepoint → 真实字形）。系统装有 Noto Sans SC
+            // （与思源黑体同一套字形设计），把乱码字与全 CJK 候选用同尺寸渲染做墨迹归一化位图匹配即可还原明文。
+            // 真机验证：媕媑媒媖媓媔念 → 简析版画的概念（与已知明文完全一致，字面得分 0）。
+            _cxSecretFontB64() {
+                if (this._cxFontB64) return this._cxFontB64;
+                let found = '';
+                const seen = new Set();
+                const visit = (doc, depth) => {
+                    if (!doc || depth > 6 || found || seen.has(doc)) return;
+                    seen.add(doc);
+                    try {
+                        for (const sheet of Array.from(doc.styleSheets || [])) {
+                            try {
+                                for (const rule of Array.from(sheet.cssRules || [])) {
+                                    const t = rule.cssText || '';
+                                    if (t.indexOf('font-cxsecret') >= 0 && t.indexOf('base64,') >= 0) {
+                                        found = t.split('base64,')[1].split('"')[0].split(')')[0];
+                                        return;
+                                    }
+                                }
+                            } catch (e) { /* 跨域样式表 */ }
+                        }
+                    } catch (e) { /* ignore */ }
+                    try {
+                        for (const f of doc.querySelectorAll('iframe, frame')) {
+                            let d = null;
+                            try { d = f.contentDocument; } catch (e) { d = null; }
+                            if (d) visit(d, depth + 1);
+                        }
+                    } catch (e) { /* ignore */ }
+                };
+                visit(typeof document === 'undefined' ? null : document, 0);
+                this._cxFontB64 = found;
+                return found;
+            },
+            _cxSecretDecode(texts, cb) {
+                const list = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t == null ? '' : t));
+                const done = (out) => { try { cb(out); } catch (e) { console.error('[字库解密] 回调失败:', e); } };
+                if (!this.configs.cxSecretDecode) { done(list); return; }
+                const chars = [];
+                for (const t of list) {
+                    for (const ch of t) {
+                        const c = ch.charCodeAt(0);
+                        if (c >= 0x4e00 && c <= 0x9fa5 && chars.indexOf(ch) < 0) chars.push(ch);
+                    }
+                }
+                if (!chars.length) { done(list); return; }
+                const cached = this._cxSecretMap || (this._cxSecretMap = {});
+                const todo = chars.filter((ch) => !Object.prototype.hasOwnProperty.call(cached, ch));
+                const finish = () => done(list.map((t) => t.replace(/[\u4e00-\u9fa5]/g, (ch) => (Object.prototype.hasOwnProperty.call(cached, ch) ? cached[ch] : ch))));
+                if (!todo.length) { finish(); return; }
+                const b64 = this._cxSecretFontB64();
+                if (!b64) { console.warn('%c[字库解密] 未找到 font-cxsecret 字体，跳过解码', 'color:#FF9800'); finish(); return; }
+                const run = () => {
+                    try {
+                        const R = 48, SIZE = 32;
+                        const canvas = document.createElement('canvas');
+                        canvas.width = canvas.height = R;
+                        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                        if (!ctx) { console.warn('%c[字库解密] 当前环境无 Canvas，跳过解码', 'color:#FF9800'); finish(); return; }
+                        const bmp = (ch, family) => {
+                            ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, R, R);
+                            ctx.fillStyle = '#000'; ctx.font = '40px "' + family + '"';
+                            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                            ctx.fillText(ch, R / 2, R / 2 + 1);
+                            const img = ctx.getImageData(0, 0, R, R).data;
+                            let minX = R, minY = R, maxX = -1, maxY = -1;
+                            for (let y = 0; y < R; y++) {
+                                for (let x = 0; x < R; x++) {
+                                    if (img[(y * R + x) * 4] < 128) {
+                                        if (x < minX) minX = x;
+                                        if (x > maxX) maxX = x;
+                                        if (y < minY) minY = y;
+                                        if (y > maxY) maxY = y;
+                                    }
+                                }
+                            }
+                            if (maxX < 0) return null;
+                            const w = maxX - minX + 1, h = maxY - minY + 1;
+                            const out = new Float32Array(SIZE * SIZE);
+                            for (let y = 0; y < SIZE; y++) {
+                                for (let x = 0; x < SIZE; x++) {
+                                    const sx = minX + Math.min(w - 1, Math.floor((x + 0.5) * w / SIZE));
+                                    const sy = minY + Math.min(h - 1, Math.floor((y + 0.5) * h / SIZE));
+                                    out[y * SIZE + x] = img[(sy * R + sx) * 4] < 128 ? 1 : 0;
+                                }
+                            }
+                            return out;
+                        };
+                        let cands = (typeof window !== 'undefined' && window.__xtCxCands) || null;
+                        if (!cands) {
+                            cands = [];
+                            for (let cp = 0x4e00; cp <= 0x9fa5; cp++) {
+                                const ch = String.fromCharCode(cp);
+                                const b = bmp(ch, 'Noto Sans SC');
+                                if (b) cands.push({ ch: ch, b: b });
+                            }
+                            if (typeof window !== 'undefined') window.__xtCxCands = cands;
+                        }
+                        const matched = [];
+                        for (const ch of todo) {
+                            const tb = bmp(ch, 'xt_cxsecret');
+                            if (!tb) { cached[ch] = ch; continue; }
+                            let best = '', bs = Infinity;
+                            for (const c of cands) {
+                                let d = 0;
+                                for (let i = 0; i < SIZE * SIZE; i++) {
+                                    const diff = tb[i] - c.b[i];
+                                    if (diff) d += diff * diff;
+                                }
+                                if (d < bs) { bs = d; best = c.ch; }
+                            }
+                            cached[ch] = best || ch;
+                            matched.push(ch + '→' + cached[ch]);
+                        }
+                        if (matched.length) console.log('%c[字库解密] 已还原 ' + matched.length + ' 个混淆字：' + matched.slice(0, 20).join(' '), 'color:#4CAF50');
+                        finish();
+                    } catch (e) { console.warn('%c[字库解密] 失败：' + (e && e.message ? e.message : e), 'color:#FF9800'); finish(); }
+                };
+                if (!this._cxFontLoaded && typeof FontFace !== 'undefined' && document.fonts) {
+                    try {
+                        const ff = new FontFace('xt_cxsecret', 'url(data:font/ttf;base64,' + b64 + ')');
+                        ff.load().then(() => { document.fonts.add(ff); this._cxFontLoaded = true; run(); }).catch(() => { run(); });
+                    } catch (e) { run(); }
+                } else { run(); }
+            },
             _workQuestionList(quizDoc) {
                 const win = quizDoc.defaultView;
                 const out = [];
@@ -2538,12 +2670,14 @@
                     const answerId = textarea ? String(textarea.id).replace(/^answer/, '') : '';
                     let typeCode = '';
                     try { typeCode = answerId && win.jQuery ? String(win.jQuery('#answertype' + answerId).val() || '') : ''; } catch (e) { typeCode = ''; }
-                    const isShortAnswer = /简答|论述|分析|写作/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0;
+                    // F17：先收集选项与编辑器，再判题型 —— 「有编辑器且无选项」一律按写作题处理
+                    // （真机演练：资料题【资料题】被误判为选择题导致「无法匹配选项」而停止）。
                     let optionEls = [];
-                    if (!isShortAnswer) {
-                        try { optionEls = Array.from(timu.querySelectorAll('.Zy_ulTop li, .Zy_ulTk li')).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() })); } catch (e) { optionEls = []; }
-                    }
-                    out.push({ typeLabel: typeLabel, typeCode: typeCode, rawText: rawText, answerId: answerId, textarea: textarea, isShortAnswer: isShortAnswer, optionEls: optionEls });
+                    try { optionEls = Array.from(timu.querySelectorAll('.Zy_ulTop li, .Zy_ulTk li')).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() })); } catch (e) { optionEls = []; }
+                    let editorCount = 0;
+                    try { editorCount = timu.querySelectorAll('.edui-editor').length; } catch (e) { editorCount = 0; }
+                    const isShortAnswer = (optionEls.length === 0 && editorCount > 0) || /简答|论述|分析|写作|资料/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0;
+                    out.push({ typeLabel: typeLabel, typeCode: typeCode, rawText: rawText, answerId: answerId, textarea: textarea, isShortAnswer: isShortAnswer, optionEls: optionEls, editorCount: editorCount });
                 });
                 return out;
             },
@@ -2710,35 +2844,40 @@
                             return;
                         }
                         const q = questions[qi];
-                        const questionText = texts[qi] || q.rawText || String(work.title || '');
-                        if (q.isShortAnswer) {
-                            console.log('%c[LLM] 第 ' + (qi + 1) + ' 题（简答）作答中：' + String(questionText).slice(0, 50), 'color:#2196F3');
+                        const rawQuestion = texts[qi] || q.rawText || String(work.title || '');
+                        const rawOptions = q.optionEls.map((o) => o.text);
+                        // F17：先解密 font-cxsecret 混淆文本（题干 + 选项），再交给 LLM 作答/匹配。
+                        this._cxSecretDecode([rawQuestion].concat(rawOptions), (decoded) => {
+                            const questionText = decoded[0] || rawQuestion;
+                            if (q.isShortAnswer) {
+                                console.log('%c[LLM] 第 ' + (qi + 1) + ' 题（写作/简答）作答中：' + String(questionText).slice(0, 50), 'color:#2196F3');
+                                this._llmRequest(
+                                    this._llmBuildPayload(this._llmBuildShortMessages(questionText)),
+                                    (content) => {
+                                        const text = this._llmExtractFreeText(content);
+                                        const ok = this._fillWorkAnswer(quiz.win, q, text);
+                                        console.log('%c[LLM] 第 ' + (qi + 1) + ' 题答案' + (ok ? '已填入编辑器' : '填充失败') + '：' + String(text).slice(0, 60), ok ? 'color:#9C27B0' : 'color:#FF9800');
+                                        if (!ok) { giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
+                                        askNext(qi + 1);
+                                    },
+                                    (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
+                                );
+                                return;
+                            }
+                            const options = q.optionEls.map((o, i) => ({ el: o.el, text: decoded[i + 1] || o.text, letter: String.fromCharCode(65 + i) }));
                             this._llmRequest(
-                                this._llmBuildPayload(this._llmBuildShortMessages(questionText)),
+                                this._llmBuildPayload(this._llmBuildMessages(questionText, options)),
                                 (content) => {
-                                    const text = this._llmExtractFreeText(content);
-                                    const ok = this._fillWorkAnswer(quiz.win, q, text);
-                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题答案' + (ok ? '已填入编辑器' : '填充失败') + '：' + String(text).slice(0, 60), ok ? 'color:#9C27B0' : 'color:#FF9800');
-                                    if (!ok) { giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
+                                    const answer = this._llmExtractAnswer(content);
+                                    const chosen = this._llmPickOption(options, answer);
+                                    if (!chosen) { giveUp('第 ' + (qi + 1) + ' 题无法匹配选项'); return; }
+                                    try { chosen.el.click(); } catch (e) { /* ignore */ }
+                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + String(chosen.text || '').slice(0, 40), 'color:#9C27B0');
                                     askNext(qi + 1);
                                 },
                                 (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
                             );
-                            return;
-                        }
-                        const options = q.optionEls.map((o, i) => ({ el: o.el, text: o.text, letter: String.fromCharCode(65 + i) }));
-                        this._llmRequest(
-                            this._llmBuildPayload(this._llmBuildMessages(questionText, options)),
-                            (content) => {
-                                const answer = this._llmExtractAnswer(content);
-                                const chosen = this._llmPickOption(options, answer);
-                                if (!chosen) { giveUp('第 ' + (qi + 1) + ' 题无法匹配选项（选项可能被字体混淆）'); return; }
-                                try { chosen.el.click(); } catch (e) { /* ignore */ }
-                                console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + String(chosen.text || '').slice(0, 40), 'color:#9C27B0');
-                                askNext(qi + 1);
-                            },
-                            (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
-                        );
+                        });
                     };
                     askNext(0);
                 };

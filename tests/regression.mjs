@@ -957,6 +957,18 @@ test('F16-1 后台保活：隐藏状态下被暂停的视频直接在后台续�
     check('F16-1 视频已恢复播放', video.paused === false, 'paused=' + video.paused);
     app._stopHiddenKeepAlive();
 });
+test('F17-1 资料题判定修复（有编辑器无选项→写作题）+ 字体解密优雅降级', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div id="quiz"></div>' });
+    const app = await env.boot();
+    const doc = env.window.document;
+    doc.getElementById('quiz').innerHTML = '<div class="TiMu"><div class="Zy_TItle"><span class="newZy_TItle">【资料题】</span>案例：患者男性，80岁……</div>'
+        + '<div class="edui-editor"></div><textarea id="answer405825412"></textarea></div>';
+    const list = app._workQuestionList(doc);
+    check('F17-1 资料题（有编辑器无选项）判定为写作题', list.length === 1 && list[0].isShortAnswer === true, JSON.stringify(list.map((x) => ({ t: x.typeLabel, sa: x.isShortAnswer, ops: x.optionEls.length, ed: x.editorCount }))));
+    let decoded = null;
+    app._cxSecretDecode(['测试文本'], (t) => { decoded = t; });
+    check('F17-1 无字体/Canvas 环境优雅降级', Array.isArray(decoded) && decoded[0] === '测试文本', JSON.stringify(decoded));
+});
 test('F15-1 防挂机暂停拦截：无用户意图的 pause 被拦、用户点击后的 pause 放行', async () => {
     const { env, video } = await envWithTree(chapterSpecs(['1.1']), { stepTitle: '视频' });
     const app = await env.boot();
