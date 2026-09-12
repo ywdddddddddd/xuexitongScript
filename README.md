@@ -62,6 +62,7 @@ videoTaskFrameMaxCount: 12
 videoCompleteRatio: 0.9
 pauseGuard: true
 cxSecretDecode: true
+workSanityLock: true
 docTaskScroll: false
 docTaskScrollStepMs: 800
 docTaskMaxMs: 240000
@@ -105,6 +106,7 @@ llmWorkWaitMs: 90000
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。
 - `pauseGuard`（默认 **true**，V3.6 新增）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停。只拦截「最近 1.5 秒无点击/按键」的暂停调用；用户主动点击暂停仍正常生效。如遇异常可设为 `false` 关闭。
 - `cxSecretDecode`（默认 **true**，V3.6 新增）：自动解密平台的 font-cxsecret 反copy字体（用系统 Noto Sans SC/思源黑体同字形做位图匹配），解密题干与选项后再交给 LLM 作答/匹配；无字体或无 Canvas 环境自动跳过。
+- `workSanityLock`（默认 **true**，V3.6 新增）：题目合格性预检 + 提交锁。给 AI 发请求前先校验题目（排除界面文案/过短/选项不足等异常），异常或未全部作答时**上锁拒绝提交**，交人工处理（修复真机演练中「编辑器外壳被当选项 → 提交空值」事故）。
 - `docTaskScroll`（默认 **false**，V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）；开启后自动把文档滚动到底部并等待平台标记完成。
 ## 使用方法
 

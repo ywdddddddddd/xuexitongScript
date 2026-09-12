@@ -123,6 +123,9 @@
                 pauseGuard: true,
                 // F17（V3.6）：font-cxsecret 反copy字体自动解密（用系统 Noto Sans SC 做字形匹配）。
                 cxSecretDecode: true,
+                // F19（V3.6）：题目合格性预检 + 提交锁。校验不通过（题目疑似界面文案/过短/选项不足/作答异常）
+                // 一律不提交并上锁，交人工处理（真机教训：编辑器外壳被当选项 → 提交了 8 次空值）。
+                workSanityLock: true,
                 // F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭；开启后自动滚动文档到底部并等待平台标记完成。
                 docTaskScroll: false,
                 docTaskScrollStepMs: 800,
@@ -705,6 +708,8 @@
             _cxFontB64: '',
             _cxFontLoaded: false,
             _cxSecretMap: null,
+            _workLocked: false,
+            _workLockReason: '',
             _guardProbeTimer: null,
             _seekBackTimesThisUnit: 0,
             _seekBackCapLogged: false,
@@ -2734,6 +2739,28 @@
                     return true;
                 } catch (e) { return false; }
             },
+            // F19：题目合格性预检——给 AI 发请求/提交前，先排除明显不合格的「题目」（界面文案、过短、选项不足等）。
+            _isQuestionSane(questionText, question) {
+                const raw = String(questionText == null ? '' : questionText);
+                const t = raw.replace(/【[^】]{1,10}】/g, '').replace(/\s+/g, ' ').trim();
+                if (!t) return { ok: false, reason: '题目文本为空' };
+                if (t.length < 8) return { ok: false, reason: '题目文本过短（' + t.length + ' 字）' };
+                if (/填写答案|段落格式|字体|字号|点击上传|wordNum|edui|取消静音|播放速度|加载完毕/.test(t)) return { ok: false, reason: '题目疑似编辑器/播放器界面文案' };
+                if (/^[0-9\s.、．]+$/.test(t)) return { ok: false, reason: '题目无有效文字内容' };
+                const cjkCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
+                if (cjkCount < 6) return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
+                if (t.length < 12 && !/[?？]/.test(t)) return { ok: false, reason: '题目过短且无疑问特征' };
+                if (question && !question.isShortAnswer) {
+                    const ops = (question.optionEls || []).length;
+                    if (ops < 2) return { ok: false, reason: '选择题有效选项不足（' + ops + ' 个）' };
+                }
+                return { ok: true, reason: '' };
+            },
+            _lockWork(reason, detail) {
+                this._workLocked = true;
+                this._workLockReason = reason;
+                console.warn('%c[作业] ⛔ 已上锁：' + reason + '（拒绝自动提交，请人工处理）' + (detail ? ' ｜ ' + String(detail).slice(0, 100) : ''), 'color:#F44336;font-weight:bold');
+            },
             // F18：提交前空值守卫——统计题目的有效作答（写作题看编辑器正文，选择题看是否有选中项）。
             _workHasAnswer(quiz, questions) {
                 let filled = 0;
@@ -2779,6 +2806,11 @@
                 return false;
             },
             _submitWork(quizWin, topDoc, done) {
+                if (this.configs.workSanityLock && this._workLocked) {
+                    console.warn('%c[作业] 已上锁（' + (this._workLockReason || '异常状态') + '）：拒绝任何提交动作', 'color:#F44336');
+                    done(false, '作业已上锁：' + (this._workLockReason || '异常状态'));
+                    return;
+                }
                 const clickConfirm = () => {
                     try {
                         const all = Array.from(topDoc.querySelectorAll('a, button, span'));
@@ -2839,6 +2871,8 @@
                         return;
                     }
                     const work = works[wi];
+                    this._workLocked = false;
+                    this._workLockReason = '';
                     const quiz = this._quizDocOf(work.frame);
                     if (!quiz || !quiz.doc) {
                         this._workBusy = false;
@@ -2859,9 +2893,14 @@
                     };
                     const askNext = (qi) => {
                         if (qi >= questions.length) {
-                            // F18：提交前校验——没有任何有效答案时拒绝提交（防止空值入库）。
+                            if (this._workLocked) { giveUp('作业已上锁（' + (this._workLockReason || '异常状态') + '），拒绝提交'); return; }
+                            // F18/F19：提交前校验——必须每道题都有有效作答，否则上锁拒绝提交（防止空值/缺题入库）。
                             const filledCount = this._workHasAnswer(quiz, questions);
-                            if (!filledCount) { giveUp('未检测到任何有效答案，已拦截空值提交'); return; }
+                            if (this.configs.workSanityLock && filledCount < questions.length) {
+                                this._lockWork('有效作答 ' + filledCount + '/' + questions.length + '，未全部完成');
+                                giveUp('有效作答 ' + filledCount + '/' + questions.length + '，未全部完成，已上锁拒绝提交');
+                                return;
+                            }
                             console.log('%c[作业] 提交前校验通过（有效作答 ' + filledCount + '/' + questions.length + ' 题）', 'color:#4CAF50');
                             this._submitWork(quiz.win, document, (ok, msg) => {
                                 if (!ok) { giveUp(msg); return; }
@@ -2885,15 +2924,31 @@
                         // F17：先解密 font-cxsecret 混淆文本（题干 + 选项），再交给 LLM 作答/匹配。
                         this._cxSecretDecode([rawQuestion].concat(rawOptions), (decoded) => {
                             const questionText = decoded[0] || rawQuestion;
+                            // F19：发给 AI 前先做题目合格性预检（不合格直接上锁，绝不把奇怪内容发出去）。
+                            if (this.configs.workSanityLock) {
+                                const sanity = this._isQuestionSane(questionText, q);
+                                if (!sanity.ok) {
+                                    this._lockWork('题目校验未通过：' + sanity.reason, questionText);
+                                    giveUp('题目校验未通过（' + sanity.reason + '），已上锁拒绝提交');
+                                    return;
+                                }
+                            }
                             if (q.isShortAnswer) {
                                 console.log('%c[LLM] 第 ' + (qi + 1) + ' 题（写作/简答）作答中：' + String(questionText).slice(0, 50), 'color:#2196F3');
                                 this._llmRequest(
                                     this._llmBuildPayload(this._llmBuildShortMessages(questionText)),
                                     (content) => {
                                         const text = this._llmExtractFreeText(content);
+                                        // F19：LLM 未给出有效答案（空 / 明确表示无法作答 / 疑似推理泄漏）→ 上锁，拒绝提交。
+                                        const flat = String(text || '').replace(/<[^>]*>/g, '').replace(/\s+/g, '');
+                                        if (!flat || flat.length < 4 || /题目信息不足|无法提供参考答案|无法作答|乱码|We need answer/i.test(String(text || ''))) {
+                                            this._lockWork('AI 未给出有效答案', text);
+                                            giveUp('AI 未给出有效答案，已上锁拒绝提交');
+                                            return;
+                                        }
                                         const ok = this._fillWorkAnswer(quiz.win, q, text);
                                         console.log('%c[LLM] 第 ' + (qi + 1) + ' 题答案' + (ok ? '已填入编辑器' : '填充失败') + '：' + String(text).slice(0, 60), ok ? 'color:#9C27B0' : 'color:#FF9800');
-                                        if (!ok) { giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
+                                        if (!ok) { this._lockWork('第 ' + (qi + 1) + ' 题答案填充失败'); giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
                                         askNext(qi + 1);
                                     },
                                     (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))

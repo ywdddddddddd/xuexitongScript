@@ -957,6 +957,20 @@ test('F16-1 后台保活：隐藏状态下被暂停的视频直接在后台续�
     check('F16-1 视频已恢复播放', video.paused === false, 'paused=' + video.paused);
     app._stopHiddenKeepAlive();
 });
+test('F19-1 题目合格性预检 + 提交锁（异常一律不提交）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
+    const app = await env.boot();
+    check('F19-1 编辑器界面文案被判不合格', app._isQuestionSane('填写答案 段落格式字体字号点击上传x var wordNum', { isShortAnswer: true }).ok === false, '');
+    check('F19-1 过短标题被判不合格', app._isQuestionSane('第三章 课后讨论', { isShortAnswer: true }).ok === false, '');
+    check('F19-1 选择题选项不足被判不合格', app._isQuestionSane('以下关于口腔检查的说法正确的是？', { isShortAnswer: false, optionEls: [] }).ok === false, '');
+    const good = app._isQuestionSane('男性患者，四川口音，80岁，一周前因牙痛到口腔科就诊。请与其沟通，化解矛盾，使病人配合治疗。', { isShortAnswer: true });
+    check('F19-1 真实案例题判为合格', good.ok === true, good.reason);
+    app._workLocked = true;
+    app._workLockReason = '测试锁定';
+    let submitResult = null;
+    app._submitWork({ document: env.window.document, UE: {} }, env.window.document, (ok, msg) => { submitResult = { ok, msg }; });
+    check('F19-1 上锁后拒绝提交', submitResult && submitResult.ok === false, JSON.stringify(submitResult));
+});
 test('F17-1 资料题判定修复（有编辑器无选项→写作题）+ 字体解密优雅降级', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div id="quiz"></div>' });
     const app = await env.boot();
