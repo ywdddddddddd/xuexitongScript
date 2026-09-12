@@ -248,6 +248,7 @@
                 this._userPaused = false;
                 this._interactionBlocked = false;
                 this._tryTimes = 0;
+                this._emptyContentStreak = 0;
                 this._currentVideoTaskIndex = 0;
                 this._videoTaskCount = 0;
                 this._videoTaskAllComplete = false;
@@ -708,6 +709,8 @@
                 }
             },
             _tryTimes: 0,
+            // F21（V3.6 补丁）：空视频节点（平台内容帧「暂无内容」）连续命中计数，连续 2 次才转入无视频流程。
+            _emptyContentStreak: 0,
             _stepAdvanceTimes: 0,
             _stepSwitchAt: 0,
             _stepSwitchPending: false,
@@ -740,6 +743,17 @@
                     const el = this._getVideoEl();
                     if (el == null) {
                         if (this._currentStepTitle() === '视频') {
+                            // F21（V3.6 补丁）：空视频节点——老师没上传内容时平台内容帧只有「暂无内容」，
+                            // 不再按「视频组件尚未加载完成」重试到触顶，而是转入既有的无视频节点流程：
+                            // 有完成标记/图标级证据就有界前进，识别不出来则安全停止（或按 autoAdvanceNoVideo 有界前进）。
+                            // 连续 2 次（间隔=retryInterval）确认才动作，避免真实视频刚切换时的瞬时空白被误判。
+                            this._emptyContentStreak = this._isEmptyContentVideoNode() ? (this._emptyContentStreak || 0) + 1 : 0;
+                            if (this._emptyContentStreak >= 2) {
+                                console.warn('%c检测到「视频」节点但平台内容为空（「暂无内容」，疑似老师未上传）→ 转入无视频节点处理流程', 'color:#FF9800');
+                                this._emptyContentStreak = 0;
+                                this._handleNoVideoNode();
+                                return;
+                            }
                             throw new Error('视频组件尚未加载完成');
                         }
                         // F11（V3.6）：未完成的内嵌章节测验/作业优先处理，绝不跳过
@@ -774,6 +788,7 @@
                     this._isPlaying = true;
                     // F3（#38 #43）：重新看到视频即结束「连续自动前进」计数。
                     this._consecutiveNoVideoAdvances = 0;
+                    this._emptyContentStreak = 0; // F21：重新看到视频即清零空节点计数
                     this._videoEventHandle();
                     el.playbackRate = this.configs.playbackRate;
                     // F4（#19 #32）：不默认强制静音；只沿用用户此前手动选择过的静音状态。
@@ -852,6 +867,62 @@
                 };
                 visit(typeof document === 'undefined' ? null : document, 0);
                 return { total: total, unfinished: unfinished };
+            },
+            _isEmptyContentVideoNode() {
+                // F21（V3.6 补丁，真机演练：第 16 章「16.1.2 视频」空节点）：
+                // 老师没有给该节点上传任何内容时，平台内容帧只有空占位文案「暂无内容」——
+                // 此时既没有 <video> 也没有任何任务点 iframe，不能按「视频组件尚未加载完成」去重试。
+                // 只有同时满足「内容帧已加载且正文为暂无内容」+「全页无任何视频证据」才判定为空节点，
+                // 避免把加载中的真实视频误判成空节点而跳过节。
+                if (typeof document === 'undefined') return false;
+                const state = { emptyPlaceholder: false, videoEvidence: false };
+                const textOf = (doc) => {
+                    try {
+                        const body = doc && doc.body;
+                        if (!body) return '';
+                        return String(body.innerText || body.textContent || '').replace(/\s+/g, ' ').trim();
+                    } catch (e) {
+                        return '';
+                    }
+                };
+                const scan = (doc, depth) => {
+                    if (!doc || depth > 4 || state.videoEvidence) return;
+                    try {
+                        if (doc.querySelector && doc.querySelector('video')) {
+                            state.videoEvidence = true;
+                            return;
+                        }
+                    } catch (e) { /* ignore */ }
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        if (state.videoEvidence) return;
+                        let src = '';
+                        let jobid = '';
+                        try {
+                            src = String(frame.getAttribute('src') || '');
+                            jobid = String(frame.getAttribute('jobid') || '');
+                        } catch (e) { /* ignore */ }
+                        // 视频任务点 iframe（jobid="video-xxx"）出现即视为视频证据，宁可继续重试也不误跳。
+                        if (jobid && /video/i.test(jobid)) {
+                            state.videoEvidence = true;
+                            return;
+                        }
+                        let childDoc = null;
+                        try { childDoc = frame.contentDocument; } catch (e) { childDoc = null; }
+                        // 内容帧识别：src 指向知识卡片页（生产环境实际结构），或 id="iframe" 的旧版内容帧
+                        // （新旧壳页共存，id 兜底且仍叠加「暂无内容 + 全页无视频证据」双条件，误判概率极低）。
+                        const isContentFrame = /knowledge\/(cards|content)/.test(src) || frame.id === 'iframe';
+                        if (childDoc && isContentFrame) {
+                            let ready = true;
+                            try { ready = !childDoc.readyState || childDoc.readyState !== 'loading'; } catch (e) { ready = true; }
+                            if (ready && /^暂无(学习)?内容/.test(textOf(childDoc))) state.emptyPlaceholder = true;
+                        }
+                        if (childDoc) scan(childDoc, depth + 1);
+                    }
+                };
+                try { scan(document, 0); } catch (e) { return false; }
+                return state.emptyPlaceholder && !state.videoEvidence;
             },
             _handleNoVideoNode() {
                 // F3（#38 #42 #43 #50）：无视频/课件页不再默认卡死，但也不能盲目乱跳：
@@ -1486,6 +1557,7 @@
                 // t6：切小节时取消可能残留的上一段视频的自动跳转定时器（并复位结束去重标志）。
                 this._cancelDelayedNextUnit('切换小节');
                 this._isPlaying = false;
+                this._emptyContentStreak = 0;
                 this._currentVideoTaskIndex = 0;
                 this._llmChapterSuggesting = false;
                 this._llmChapterSuggestDone = false;

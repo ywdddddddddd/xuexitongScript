@@ -10,6 +10,7 @@
  *   F1 nextUnit() 死锁：失败的 play() 之后仍可再次触发
  *   F2 同一章 3 个视频节点按 1→2→3 推进；解析失败时明确报错且不静默跳章
  *   F3 无视频节点：可识别完成才前进，识别不了则安全停止且连续前进受上限约束
+ *   F21 空视频节点（标题「视频」但平台内容占位「暂无内容」）不按加载失败重试触顶，转入无视频流程
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -701,6 +702,64 @@ test('F3-4 任务点未完成弹窗点「去学习」而不是「下一节」，
     check('F3-4 触顶后打印停止提示', env.xt.has('弹窗处理已达上限'), '');
     check('F3-4 触顶后仍不点「下一节」', nextSection === 0, 'nextSection=' + nextSection);
 });
+// ---------------------------------------------------------------------------
+// F21 空视频节点（标题「视频」但平台内容占位「暂无内容」，真机背景：第 16 章 16.1.2）
+// ---------------------------------------------------------------------------
+
+test('F21-1 「视频」空节点 + 平台完成标记 → 不再重试触顶，转入无视频流程有界前进', async () => {
+    const spec = [
+        { title: '第1章', active: 'leaf', activeIndex: 0, nodes: [{ title: '1.1 视频', extraClass: 'icon_Completed' }] },
+        { title: '第2章', active: 'none', activeIndex: 0, nodes: [{ title: '2.1 课件' }] },
+    ];
+    const html = tree(spec)
+        + '<iframe id="iframe" src="about:blank"></iframe>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    await writeFrame(env, 'iframe', '暂无内容');
+    const app = await env.boot();
+    check('F21-1 空节点判定为 true', app._isEmptyContentVideoNode() === true, '');
+    await env.advance(30000);
+    check('F21-1 打印空节点识别日志', env.xt.has('平台内容为空'), JSON.stringify(env.xt.logs.slice(-6)));
+    check('F21-1 不再出现「已达到最大重试次数」', !env.xt.has('已达到最大重试次数'), '');
+    check('F21-1 有界前进到下一章', env.lastTreeClickTitle() === '2.1 课件', 'last=' + env.lastTreeClickTitle());
+});
+
+test('F21-2 「视频」空节点识别不出完成状态 → 安全停止（不重试触顶、零点击）', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<iframe id="iframe" src="about:blank"></iframe>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    await writeFrame(env, 'iframe', '暂无内容');
+    const app = await env.boot();
+    await env.advance(120000);
+    check('F21-2 打印空节点识别日志', env.xt.has('平台内容为空'), '');
+    check('F21-2 走无视频安全停止流程', env.xt.has('已安全停止'), JSON.stringify(env.xt.logs.slice(-8)));
+    check('F21-2 不再出现「已达到最大重试次数」', !env.xt.has('已达到最大重试次数'), '');
+    check('F21-2 零点击', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
+});
+
+test('F21-3 页面存在视频元素时，空节点判定必须为 false（不误跳真实视频节点）', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<iframe id="iframe" src="about:blank"></iframe>'
+        + '<iframe id="player" src="about:blank"></iframe>';
+    const env = createEnv({ html });
+    await writeFrame(env, 'iframe', '暂无内容');
+    const pdoc = await writeFrame(env, 'player', '<video id="v" src="https://example.com/a.mp4"></video>');
+    stubVideo(env, pdoc.getElementById('v'), {});
+    const app = await env.boot();
+    check('F21-3 有视频元素时判定为空节点=false', app._isEmptyContentVideoNode() === false, '');
+});
+
+test('F21-4 视频任务点 iframe（jobid=video-*）存在时，空节点判定必须为 false', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<iframe id="iframe" src="about:blank"></iframe>'
+        + '<iframe id="task-1" jobid="video-123" class="ans-insertvideo-online" src="about:blank"></iframe>';
+    const env = createEnv({ html });
+    await writeFrame(env, 'iframe', '暂无内容');
+    const app = await env.boot();
+    check('F21-4 有视频任务点 iframe 时判定为空节点=false', app._isEmptyContentVideoNode() === false, '');
+});
+
 // ---------------------------------------------------------------------------
 // F4 异常暂停与风控（#19 #26 #32 #54 #55）
 // ---------------------------------------------------------------------------

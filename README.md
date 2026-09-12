@@ -20,13 +20,15 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 | F6 | 少量播放器识别不到 | #18 #52 #55（PR #48 的 frame 守卫思路） | 选择器覆盖 `video#video_html5_api`、`[id*=video_html5]`、`.vjs-tech`、`[src]`；嵌套 frame 搜索深度上限 `videoFrameMaxDepth`；切换小节或 iframe 重载时显式失效视频缓存；跨域 frame 抛 `SecurityError` 时静默跳过，不打印硬错误 |
 | F7 | 粘完没反应、文档链接 404 | #4 #5 #12 #16 #17 #23 #33 #47 | 启动超时/目录未就绪/jQuery CDN 被拦截时给出可操作提示；README 内链接全部指向仓库内真实文件，默认配置与代码保持一致 |
 
+| F21 | 老师没上传视频的「视频」小节：重试 10 次后卡死（真机演练：第 16 章 16.1.2） | 真机长流程演练 | 新增空节点识别 `_isEmptyContentVideoNode()`：内容帧（`/knowledge/cards` 或 `#iframe`）已加载且正文为「暂无内容」、全页又没有任何视频证据时，连续 2 次确认后转入既有的无视频节点流程——有完成标记/任务点图标级证据就有界前进，否则安全停止（或按 `autoAdvanceNoVideo` 有界前进），不再按「视频组件尚未加载完成」重试到触顶 |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
 - [v3_optimized.user.js](v3_optimized.user.js) —— Tampermonkey 油猴版（构建产物）
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F10，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F21，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
@@ -86,7 +88,7 @@ llmWorkWaitMs: 90000
 关键项说明：
 
 - `playbackRate`（默认 **1.0 原速**）：学习通每 60 秒向 `multimedia/log` 上报一次观看时间，部分课程要求观看时长达到 100%，1.5 倍速容易学时不达标（#28 #31）且更容易触发反作弊（验证码，#54）。这是**平台约束，不是脚本缺陷**；需要倍速可手动调高：`app.configs.playbackRate = 2; app.run()`。脚本只设置一次倍速，**不做任何 `ratechange` 强制回写对抗**。
-- `autoAdvanceNoVideo`（默认 **false**）：无视频小节在**无法识别完成状态**时是否仍然前进。默认关闭，此时脚本安全停止并提示；把它设为 `true` 后脚本会按上限有界前进。若节点自身带完成标记（例如完成图标），即使保持 false 也会自动前进。V3.6 起，推进前会先做**任务点图标级校验**（F20）：本小节没有任何任务点、或全部任务点均已完成时，直接按「已完成」推进——避免「明明做完了却报无法识别」（课件/PPT 节点常见）。
+- `autoAdvanceNoVideo`（默认 **false**）：无视频小节在**无法识别完成状态**时是否仍然前进。默认关闭，此时脚本安全停止并提示；把它设为 `true` 后脚本会按上限有界前进。若节点自身带完成标记（例如完成图标），即使保持 false 也会自动前进。V3.6 起，推进前会先做**任务点图标级校验**（F20）：本小节没有任何任务点、或全部任务点均已完成时，直接按「已完成」推进——避免「明明做完了却报无法识别」（课件/PPT 节点常见）。V3.6 补丁（F21）：标题是「视频」但老师未上传内容时，平台内容帧会显示占位「暂无内容」，脚本连续确认 2 次后直接转入本流程判定，不再被误当成「播放器没加载好」重试 10 次后卡死。
 - `maxConsecutiveNoVideoAdvances`（默认 3）：连续自动前进的上限，防止在异常目录结构里死循环。
 - `resumeMaxAttemptsPerUnit`（默认 5）：每个小节内最多主动恢复播放的次数；`guardResumeCooldownMs` 是两次恢复之间的冷却。连续抢播 `pause` 会显著提高触发平台风控/验证码的概率（反馈 #54）。
 - `videoFrameMaxDepth`（默认 4）：嵌套 iframe 的搜索深度上限，带自我保护，不会无限递归。
@@ -224,7 +226,7 @@ V3.5 在原有控制台交互（`app.run()` / `app.nextUnit()` / `app.resumeAuto
 ### 控制台常见报错怎么处理？
 
 - 「找不到视频列表」：不在课程播放页，或目录还没加载完
-- 「视频组件尚未加载完成」：播放器 iframe 还没就绪，脚本会按 `retryInterval` 重试，最多 `maxRetries` 次
+- 「视频组件尚未加载完成」：播放器 iframe 还没就绪，脚本会按 `retryInterval` 重试，最多 `maxRetries` 次；若属于**老师没上传内容**的空节点（内容帧显示「暂无内容」），F21 会在连续 2 次确认后转入无视频流程，不再重试到触顶
 - 「无法解析当前课程节点」：目录里没有 `.posCatalog_active` 高亮（页面未渲染完或结构变化），脚本会停止自动跳转；手动点一下目标小节再 `app.run()` 即可
 - 「当前小节未发现视频，且无法识别…已安全停止」：属于纯课件/已完成小节；确认无误后 `app.nextUnit()`，或把 `autoAdvanceNoVideo` 设为 `true` 让脚本有界自动前进（#38 #43）
 - 「AbortError: The play() request was interrupted by a call to pause()」：多为播放器初始化时的瞬时中断，脚本会按停滞判定恢复，不是视频坏了（#19）
