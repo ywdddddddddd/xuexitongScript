@@ -72,7 +72,7 @@ llmMaxAnswersPerSession: 50
 llmAutoSubmit: false
 llmChapterTest: false
 llmEmbeddedWork: false
-llmWorkWaitMs: 45000
+llmWorkWaitMs: 90000
 ```
 
 关键项说明：
@@ -93,7 +93,7 @@ llmWorkWaitMs: 45000
 - `llmAutoSubmit`（默认 **false**）：半自动档——脚本只替你选定答案，提交/继续按钮留给你点；设为 `true` 才会自动提交。
 - `llmChapterTest`（默认 **false**，实验性）：章节测验页只在面板给出建议答案，**绝不自动点击**；识别失败自动回退「受限跳过」。
 - `llmEmbeddedWork`（默认 **false**，V3.6 新增）：节点内嵌的「章节测验/作业」（work 任务点，如简答题）自动作答：LLM 填写答案后走平台原生提交流程（`btnBlueSubmit` → 确认弹窗 → 任务点标记完成）。**默认关闭时绝不跳过**——检测到未完成内嵌测验会停止自动前进并提示。
-- `llmWorkWaitMs`（默认 45000）：提交后等待任务点标记完成的最长时间；超时按未完成处理并停止前进（不跳过）。
+- `llmWorkWaitMs`（默认 90000）：提交后等待任务点标记完成的最长时间；工作页出现「待批阅/已完成/已提交」同样视为提交成功；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。
 ## 使用方法

@@ -139,7 +139,8 @@
                 llmChapterTest: false,
                 // F11（V3.6）：内嵌章节测验/作业（work）自动作答。默认关闭；开启后 LLM 自动填写简答题并走平台原生提交流程。
                 llmEmbeddedWork: false,
-                llmWorkWaitMs: 45000,
+                // 提交后任务点标记可能延迟（待批阅），窗口放宽到 90s（真机演练实证）。
+                llmWorkWaitMs: 90000,
             },
             _videoEl: null,
             _treeContainerEl: null,
@@ -2460,6 +2461,17 @@
                     return true;
                 } catch (e) { return false; }
             },
+            _workLooksSubmitted(work) {
+                // 任务点标记可能延迟：工作页出现「待批阅/已完成/已提交」也算提交成功（真机演练：待批阅 + ans-job-finished 延迟）。
+                try {
+                    const quiz = this._quizDocOf(work.frame);
+                    if (quiz && quiz.doc && quiz.doc.body) {
+                        const t = String(quiz.doc.body.innerText || '');
+                        return /待批阅|已完成|已提交/.test(t);
+                    }
+                } catch (e) { /* ignore */ }
+                return false;
+            },
             _submitWork(quizWin, topDoc, done) {
                 const clickConfirm = () => {
                     try {
@@ -2544,8 +2556,10 @@
                             this._submitWork(quiz.win, document, (ok, msg) => {
                                 if (!ok) { giveUp(msg); return; }
                                 const waitDone = (left) => {
-                                    const still = this._findUnfinishedWorks().filter((w) => !w.finished);
-                                    if (!still.length) { nextWork(wi + 1); return; }
+                                    const all = this._findUnfinishedWorks();
+                                    const target = all.filter((w) => w.jobid === work.jobid)[0];
+                                    const submitted = target ? (target.finished || this._workLooksSubmitted(target)) : true;
+                                    if (submitted) { nextWork(wi + 1); return; }
                                     if (left <= 0) { giveUp('提交后任务点未标记完成（可能进入人工批阅或需要验证码）'); return; }
                                     this._schedule(() => waitDone(left - 1), 2000);
                                 };
