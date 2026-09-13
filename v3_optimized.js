@@ -791,7 +791,10 @@
                             this._stopForLiveNode();
                             return;
                         }
-                        if (this._currentStepTitle() === '视频') {
+                        // F38（V3.6 补丁）：本小节视频任务点已全部完成（平台已标记/上次播放遗留）时，
+                        // 不能再按「视频组件尚未加载完成」重试到触顶（真机：第7章第3节死循环）——
+                        // 跳过该分支，交给下面的无视频推进流程（_handleNoVideoNode 会按「全部完成」前进）。
+                        if (this._currentStepTitle() === '视频' && !this._videoTaskAllComplete) {
                             // F21（V3.6 补丁）：空视频节点——老师没上传内容时平台内容帧只有「暂无内容」，
                             // 不再按「视频组件尚未加载完成」重试到触顶，而是转入既有的无视频节点流程：
                             // 有完成标记/图标级证据就有界前进，识别不出来则安全停止（或按 autoAdvanceNoVideo 有界前进）。

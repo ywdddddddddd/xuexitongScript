@@ -20,6 +20,7 @@
  *   F35 选项匹配改为上游降级链（normalize_text/clean_res/is_subsequence/SequenceMatcher.ratio）
  *   F36 章节学习次数（移植上游 _extract_and_send_setlog：studentstudyAjax → setlog）
  *   F37 多选作答支持（占位符拒绝/多字母/自动重试）+ 互动题等待在途请求
+ *   F38 视频任务点全部完成时不再按「组件未加载」重试（真机第7章第3节死循环）
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1154,6 +1155,24 @@ test('F37-2 选择题重试：首次坏输出 → 严格模式重试成功', asy
     await env.advance(5000);
     check('F37-2 触发重试（共 2 次请求）', calls === 2, 'calls=' + calls);
     check('F37-2 重试后命中 B', !!(out && out.result && out.result.picked.length === 1 && out.result.picked[0].letter === 'B'), JSON.stringify(out && out.result && out.result.picked));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F38 视频任务点全部完成 ≠ 组件未加载（真机：第7章第3节重试触顶死循环）
+// ---------------------------------------------------------------------------
+
+test('F38-1 视频任务点已全部完成时直接推进，不再重试触顶', async () => {
+    const html = tree(chapterSpecs(['1.1'], ['2.1']))
+        + '<div class="ans-attach-ct ans-job-finished" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const app = await env.boot();
+    await env.advance(9000);
+    check('F38-1 未出现播放重试触顶日志', !env.xt.has('已达到最大重试次数'), JSON.stringify(env.xt.logs.slice(-4)));
+    check('F38-1 已按「全部完成」推进到下一小节', env.lastTreeClickTitle() === '2.1', 'last=' + env.lastTreeClickTitle());
     app.destroy();
 });
 
