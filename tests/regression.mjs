@@ -21,6 +21,7 @@
  *   F36 章节学习次数（移植上游 _extract_and_send_setlog：studentstudyAjax → setlog）
  *   F37 多选作答支持（占位符拒绝/多字母/自动重试）+ 互动题等待在途请求
  *   F38 视频任务点全部完成时不再按「组件未加载」重试（真机第7章第3节死循环）
+ *   F39 作答判定支持平台选中态（aria-checked/class）+ 单选护栏 + 提交按钮识别放宽
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1173,6 +1174,46 @@ test('F38-1 视频任务点已全部完成时直接推进，不再重试触顶',
     await env.advance(9000);
     check('F38-1 未出现播放重试触顶日志', !env.xt.has('已达到最大重试次数'), JSON.stringify(env.xt.logs.slice(-4)));
     check('F38-1 已按「全部完成」推进到下一小节', env.lastTreeClickTitle() === '2.1', 'last=' + env.lastTreeClickTitle());
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F39 作答判定/单选护栏/提交按钮识别（真机：10 题全选后误报「有效作答 0/10」上锁）
+// ---------------------------------------------------------------------------
+
+test('F39-1 作答判定支持平台真实选中态（aria-checked/class，无 input）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const mk = (attrs) => {
+        const li = env.window.document.createElement('li');
+        if (attrs.aria) li.setAttribute('aria-checked', attrs.aria);
+        if (attrs.cls) li.className = attrs.cls;
+        return { el: li };
+    };
+    const quiz = { win: env.window, doc: env.window.document };
+    check('F39-1 aria-checked=true 计为已作答', app._workHasAnswer(quiz, [{ optionEls: [mk({ aria: 'false' }), mk({ aria: 'true' })] }]) === 1, '');
+    check('F39-1 class=cur 计为已作答', app._workHasAnswer(quiz, [{ optionEls: [mk({ cls: 'font-cxsecret before-after' }), mk({ cls: 'cur' })] }]) === 1, '');
+    check('F39-1 未选中计为 0', app._workHasAnswer(quiz, [{ optionEls: [mk({ cls: 'font-cxsecret' })] }]) === 0, '');
+    app.destroy();
+});
+
+test('F39-2 单选护栏：多字母答案在单选时只取第一个', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const opts = [{ el: {}, text: 'A 甲', letter: 'A' }, { el: {}, text: 'B 乙', letter: 'B' }, { el: {}, text: 'C 丙', letter: 'C' }];
+    const single = app._llmPickOptions(opts, 'AB', { single: true });
+    check('F39-2 单选只取 1 个（A）', single.length === 1 && single[0].letter === 'A', JSON.stringify(single.map((o) => o.letter)));
+    const multi = app._llmPickOptions(opts, 'AB');
+    check('F39-2 多选仍取 2 个', multi.length === 2, JSON.stringify(multi.map((o) => o.letter)));
+    app.destroy();
+});
+
+test('F39-3 提交按钮识别放宽：class 含 submit + 文案子串', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div id="dlg" class="answerQuestion"><div class="submitBtn">提交答案</div><a class="other">再想想</a></div><div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const dlg = env.window.document.getElementById('dlg');
+    const found = app._findInteractionSubmit({ el: dlg });
+    check('F39-3 找到 .submitBtn「提交答案」', !!found && /提交/.test(String(found.textContent || '')), found ? String(found.textContent) : 'null');
     app.destroy();
 });
 

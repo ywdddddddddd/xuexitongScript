@@ -40,6 +40,8 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F38 | 视频任务点已全部完成的小节被误判为「组件未加载」，重试 10 次后卡死（真机：第 7 章第 3 节） | 真机演练 | `play()` 在标题为「视频」且 `_videoTaskAllComplete=true` 时不再抛错重试，转入既有无视频推进流程（按「小节内视频任务点全部完成」有界前进） |
 
+| F39 | 作业 10 题全部选完后被误判「有效作答 0/10」并上锁；互动题找不到提交按钮 | 真机演练 | 作答判定支持平台真实选中态（`aria-checked`/class/label，平台选项是没有 input 的 `<li role=radio>`）；单选护栏（多字母答案只取第一个）；提交/继续按钮识别放宽（class 含 submit/btn、文案子串、父级兜底） |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
@@ -47,7 +49,7 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [resource/font_map_table.json](resource/font_map_table.json)（上游 Samueli924/chaoxing，MIT）与 [resource/font-map-data.js](resource/font-map-data.js)（自动生成的紧凑表，供 F34 使用）
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F38，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F39，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)

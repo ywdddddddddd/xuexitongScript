@@ -2939,7 +2939,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 }
                 return (2 * total) / (A.length + B.length);
             },
-            _llmPickOptions(options, answer) {
+            _llmPickOptions(options, answer, opts) {
                 // F35（V3.6 补丁）：选项匹配改为移植上游 api/base.py 的降级链：
                 //   clean_res(去字母前缀) → is_subsequence → normalize_text + SequenceMatcher.ratio(0.8)；
                 //   纯字母/多选字母/判断题的直接命中保留（这是页面的基本形态）。
@@ -2955,7 +2955,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         if (ch < 'A' || ch > 'H') continue;
                         for (const opt of byLetter(ch)) if (picked.indexOf(opt) < 0) picked.push(opt);
                     }
-                    if (picked.length) return picked;
+                    if (picked.length) return (opts && opts.single) ? picked.slice(0, 1) : picked;
                 }
                 // 2) 答案夹带单个字母（「选B」「B选项」「答案：B」「B（xxx）」）
                 const letters = compact.match(/[A-H]/g) || [];
@@ -3019,7 +3019,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         this._llmBuildPayload(this._llmBuildMessages(questionText, options, { multi: !!isMulti, strict: attempt > 1 })),
                         (content) => {
                             const answer = this._llmExtractAnswer(content, { multi: !!isMulti });
-                            const picked = this._llmPickOptions(options, answer);
+                            const picked = this._llmPickOptions(options, answer, { single: !isMulti });
                             if (picked.length) { done(null, { answer: answer, picked: picked, raw: content, attempt: attempt }); return; }
                             if (attempt < 2) {
                                 console.log('%c[LLM] 第 ' + attempt + ' 次输出无法解析，自动重试一次（严格 JSON 模式）', 'color:#FF9800');
@@ -3121,26 +3121,29 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 }, delay);
             },
             _findInteractionSubmit(found) {
+                // F39：放宽提交/继续按钮识别 —— 兼容 class 含 submit/btn 的 div/span 与「提交答案/继续播放」等文案。
                 const scope = found && found.el;
                 if (!scope || !scope.querySelectorAll) return null;
                 const selectors = [
-                    '.answerQuestion .submitBtn',
-                    '.interaction .submitBtn',
-                    '[class*="answer"] [class*="btn"]',
-                    '[class*="question"] [class*="btn"]',
-                    'button',
-                    'a',
+                    '.submitBtn', '[class*="submit"]', '[class*="Submit"]',
+                    '[class*="answer"] [class*="btn"]', '[class*="question"] [class*="btn"]',
+                    'button', 'a', '[class*="btn"]',
                 ];
-                const words = /^(提交|继续|下一节|确定|完成|我知道了|确定提交|继续播放)$/;
-                for (const sel of selectors) {
-                    let nodes = [];
-                    try { nodes = Array.from(scope.querySelectorAll(sel)); } catch (e) { nodes = []; }
-                    for (const node of nodes) {
-                        const t = String(node.textContent || '').replace(/\s+/g, '');
-                        if (words.test(t)) return node;
+                const words = /(提交|继续|确定|完成|下一题|知道了|开始播放)/;
+                const search = (root) => {
+                    if (!root || !root.querySelectorAll) return null;
+                    for (const sel of selectors) {
+                        let nodes = [];
+                        try { nodes = Array.from(root.querySelectorAll(sel)); } catch (e) { nodes = []; }
+                        for (const node of nodes) {
+                            if (node === scope) continue;
+                            const t = String(node.textContent || node.value || '').replace(/\s+/g, '');
+                            if (t && t.length <= 12 && words.test(t)) return node;
+                        }
                     }
-                }
-                return null;
+                    return null;
+                };
+                return search(scope) || (scope.parentElement ? search(scope.parentElement) : null);
             },
             _extractInteractionOptions(nodes) {
                 const optionRe = /^[A-H][、.．:：\s]|^(对|错|正确|错误)\s*$/;
@@ -3850,8 +3853,21 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     } else {
                         let checked = false;
                         try {
+                            // F39（V3.6 补丁）：平台选项是 <li role=radio aria-checked onclick=addChoice>，没有 <input>；
+                            // 只看 input:checked 会误判 0/10 并错误上锁（真机：10 题全选后仍报「有效作答 0/10」）。
                             checked = q.optionEls.some((o) => {
-                                try { return !!o.el.querySelector('input:checked'); } catch (e) { return false; }
+                                try {
+                                    const el = o.el;
+                                    if (!el) return false;
+                                    if (el.querySelector && el.querySelector('input:checked')) return true;
+                                    if (el.getAttribute && el.getAttribute('aria-checked') === 'true') return true;
+                                    const cls = String(el.className || '');
+                                    if (/(^|\s)(cur|current|active|selected|checked|choose|chosen|on)(\s|$)/i.test(cls)) return true;
+                                    if (el.querySelector && el.querySelector('[class*="cur"],[class*="activ"],[class*="select"],[class*="check"]')) return true;
+                                    const label = el.querySelector ? el.querySelector('label') : null;
+                                    if (label && /(^|\s)(cur|current|active|selected|checked|on)(\s|$)/i.test(String(label.className || ''))) return true;
+                                    return false;
+                                } catch (e) { return false; }
                             });
                         } catch (e) { checked = false; }
                         if (checked) filled++;
