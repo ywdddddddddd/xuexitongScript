@@ -36,6 +36,8 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 | F35 | 选项匹配为自研 Dice 兜底，与上游语义不一致 | 上游 api/base.py 移植 | 改为上游降级链：`clean_res` → `normalize_text`（含异体字归一）→ `is_subsequence` → `SequenceMatcher.ratio ≥ 0.8`（difflib 等价实现）|
 | F36 | 无法增加章节学习次数 | 上游 api/base.py `_extract_and_send_setlog` 移植 | `chapterStudyCount>0` 时周期性请求 `studentstudyAjax`，从响应提取 `fystat-ans.../log/setlog` 并触发；HTTP 走油猴 GM 或宿主注入 `app.setHttpTransport(fn)` |
 
+| F37 | 内嵌作业多选题作答失败卡死（LLM 回显模板「选项字母」/推理泄漏无 JSON/只点一个选项） | 真机演练（第 9 题） | 答案解析拒绝占位符、支持多字母（"B、C"/"A和C"/数组）；多选自动识别（checkbox 或标题含多选）并按多字母匹配点击；解析失败自动重试一次（严格 JSON 提示）；互动题在 LLM 请求在途时等待完成再自动作答（不再降级人工） |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
@@ -43,7 +45,7 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [resource/font_map_table.json](resource/font_map_table.json)（上游 Samueli924/chaoxing，MIT）与 [resource/font-map-data.js](resource/font-map-data.js)（自动生成的紧凑表，供 F34 使用）
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F36，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F37，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)

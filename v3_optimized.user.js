@@ -2208,11 +2208,18 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     // F10（V3.5）：仅当显式开启 LLM 且配置齐全时尝试自动选择；失败一律回退「暂停等人工」。
                     if (!this._interactionBlocked && this._canLlmAnswer(found)) {
                         this._answerInteractionWithLlm(found);
+                    } else if (!this._interactionBlocked && this._llmInFlight) {
+                        // F37：当前有 LLM 请求在途（例如内嵌作业正在逐题作答）→ 等待其完成后自动作答，绝不降级人工。
+                        if (!this._interactionWaitLogged) {
+                            this._interactionWaitLogged = true;
+                            console.log('%c[LLM] 检测到互动题，等待当前请求完成后自动作答…', 'color:#607D8B');
+                        }
                     } else if (!this._interactionBlocked) {
                         this._blockInteractionForManual(found);
                     }
                 } else if (this._interactionBlocked) {
                     this._interactionBlocked = false;
+                    this._interactionWaitLogged = false;
                     console.log('%c互动答题弹窗已消失，恢复自动播放与跳转。', 'color:#4CAF50');
                     this.play();
                 }
@@ -2745,23 +2752,48 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 if (t.length <= 6 && /错误/.test(t)) return '错';
                 return '';
             },
-            _llmExtractAnswer(text) {
+            _llmExtractAnswer(text, opts) {
+                // F37（V3.6 补丁）：兼容多选题、拒绝模板占位回显（如「选项字母」）、支持多字母；仍优先取最后一个 JSON。
                 const raw = String(text == null ? '' : text);
-                // 优先取「最后一个」JSON 对象：推理模型可能把示例/推理过程写进 content，末尾的才是最终答案。
-                const jsonCandidates = raw.match(/\{[^{}]{0,400}\}/g) || [];
+                const wantMulti = !!(opts && opts.multi);
+                const placeholder = /^(选项字母|答案字母|选项|答案|letter|choice|选项内容|待定|无|none)$/i;
+                const lettersOf = (v) => {
+                    if (v == null) return '';
+                    if (Array.isArray(v)) v = v.join('');
+                    const s = String(v).trim();
+                    if (!s || placeholder.test(s)) return '';
+                    const letters = s.toUpperCase().match(/[A-H]/g) || [];
+                    if (!letters.length) return '';
+                    const junk = s.replace(/[A-Ha-h、,，.．:：和及\s]/g, '');
+                    if (!junk.length) return letters.join('');
+                    const ascii = s.replace(/[^A-Za-z]/g, '');
+                    if (ascii.length === letters.length) return letters.join('');
+                    return '';
+                };
+                const jsonCandidates = raw.match(/\{[^{}]{0,600}\}/g) || [];
                 for (let i = jsonCandidates.length - 1; i >= 0; i--) {
                     try {
                         const obj = JSON.parse(jsonCandidates[i]);
                         const value = obj && (obj.answer != null ? obj.answer : (obj.result != null ? obj.result : obj.choice));
-                        if (value != null && String(value).trim()) return String(value).trim();
+                        const letters = lettersOf(value);
+                        if (letters) return letters;
+                        if (value != null && String(value).trim() && !placeholder.test(String(value).trim())) {
+                            return String(value).trim();
+                        }
                     } catch (e) { /* 继续尝试更早的 JSON */ }
                 }
-                const labeled = raw.match(/(?:答案|选项|answer)\s*[:：是为]?\s*([A-Ha-h])/i);
-                if (labeled && labeled[1]) return labeled[1].toUpperCase();
+                const labeled = raw.match(/(?:答案|选项|answer)\s*[:：是为\s]*([A-H](?:\s*[、,，.．:：和及]?\s*[A-H])*)/i);
+                if (labeled && labeled[1]) return labeled[1].toUpperCase().replace(/[^A-H]/g, '');
                 const compact = raw.replace(/[\s\u0060*\u0022\u0027。．]+/g, '');
                 if (compact.length <= 8) {
                     const judge = this._llmNormalizeJudge(compact);
                     if (judge) return judge;
+                }
+                if (wantMulti) {
+                    // F37：多选兜底 —— 从回复末尾提取连续字母序列（推理模型常把答案写在最后）；必须在单选括号兜底之前。
+                    const tail = raw.slice(-160);
+                    const seq = tail.match(/[A-H](?:\s*[、,，.．:：和及]?\s*[A-H])+/g);
+                    if (seq && seq.length) return seq[seq.length - 1].replace(/[^A-H]/g, '');
                 }
                 const bracketed = raw.match(/(?:^|[^A-Za-z])([A-H])(?:\s*[\)、.．:：]|\s*$)/);
                 if (bracketed && bracketed[1]) return bracketed[1];
@@ -2799,19 +2831,23 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 }
                 return payload;
             },
-            _llmBuildMessages(question, options) {
-                const opts = Array.isArray(options) ? options : [];
-                const lines = opts.map((o, i) => {
+            _llmBuildMessages(question, options, opts) {
+                const multi = !!(opts && opts.multi);
+                const strict = !!(opts && opts.strict);
+                const list = Array.isArray(options) ? options : [];
+                const lines = list.map((o, i) => {
                     const label = o && o.letter ? String(o.letter) : String.fromCharCode(65 + i);
                     const body = String(o && o.text ? o.text : '').replace(/^[A-H][、.．:：\s]+/, '').trim();
                     return label + '、' + body;
                 });
-                const system = '你是课程答题助手。根据题目与选项选出唯一正确答案，只输出一个 JSON 对象，'
-                    + '不要解释、不要 Markdown、不要推理过程：{"answer":"选项字母"}。'
-                    + '判断题没有字母选项时，answer 输出 "对" 或 "错"。';
+                let system = '你是课程答题助手。根据题目与选项选出正确答案，只输出一个 JSON 对象，不要解释、不要 Markdown、不要推理过程。';
+                if (multi) system += '本题为多选题：answer 用多个选项字母连写（例如 "AC"），不要只给一个字母。';
+                system += '答案必须是本题选项列表中的字母，不要照抄提示文字。';
+                if (strict) system = '上一次输出无法解析。只输出一个 JSON 对象，禁止任何其他文字。' + system;
+                else system += '示例：{"answer":"A"}。';
                 const user = '题目：' + String(question || '').slice(0, 500)
                     + '\n选项：\n' + lines.join('\n')
-                    + '\n只输出 JSON，例如 {"answer":"A"}。';
+                    + '\n只输出 JSON' + (multi ? '（多选：字母连写）' : '') + '，例如 ' + (multi ? '{"answer":"AC"}' : '{"answer":"A"}') + '。';
                 return [
                     { role: 'system', content: system },
                     { role: 'user', content: user },
@@ -2953,6 +2989,33 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 for (let i = 0; i < t.length; i++) hash = ((hash << 5) - hash + t.charCodeAt(i)) | 0;
                 return 'q' + hash;
             },
+            _llmAskChoice(questionText, options, isMulti, cb) {
+                // F37：选择题统一入口 —— 解析失败自动重试一次（严格 JSON 提示），多选按字母序列匹配。
+                const done = typeof cb === 'function' ? cb : function () {};
+                let attempt = 0;
+                const ask = () => {
+                    attempt++;
+                    this._llmRequest(
+                        this._llmBuildPayload(this._llmBuildMessages(questionText, options, { multi: !!isMulti, strict: attempt > 1 })),
+                        (content) => {
+                            const answer = this._llmExtractAnswer(content, { multi: !!isMulti });
+                            const picked = this._llmPickOptions(options, answer);
+                            if (picked.length) { done(null, { answer: answer, picked: picked, raw: content, attempt: attempt }); return; }
+                            if (attempt < 2) {
+                                console.log('%c[LLM] 第 ' + attempt + ' 次输出无法解析，自动重试一次（严格 JSON 模式）', 'color:#FF9800');
+                                this._schedule(ask, Math.max(600, Number(this.configs.llmMinIntervalMs) || 800));
+                                return;
+                            }
+                            done(new Error('无法匹配选项'), { answer: answer, picked: [], raw: content, attempt: attempt });
+                        },
+                        (err) => {
+                            if (attempt < 2) { this._schedule(ask, 1200); return; }
+                            done(err || new Error('LLM 请求失败'), null);
+                        }
+                    );
+                };
+                ask();
+            },
             _canLlmAnswer(found) {
                 if (!this.configs.llmEnabled) return false;
                 if (!this._llmApiKey) {
@@ -2980,40 +3043,43 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const question = String(found.questionText || found.text || '').slice(0, 500);
                 console.log('%c[LLM] 检测到互动题，正在请求大模型作答（结果会显示在本面板）…', 'color:#2196F3');
                 this._guiRefreshStatus(true);
-                this._llmRequest(
-                    this._llmBuildPayload(this._llmBuildMessages(question, options)),
-                    (text) => this._applyInteractionAnswer(found, options, text),
-                    (err) => {
-                        console.warn('%c[LLM] 请求失败，回退为人工处理：' + (err && err.message ? err.message : String(err)), 'color:#FF9800');
+                const isMulti = /多选/.test(question)
+                    || options.some((o) => { try { return !!(o.el && o.el.querySelector && o.el.querySelector('input[type=checkbox]')); } catch (e) { return false; } });
+                this._llmAskChoice(question, options, isMulti, (err, result) => {
+                    if (err || !result || !result.picked.length) {
+                        console.warn('%c[LLM] 互动题作答失败，回退为人工处理：' + (err ? err.message : '无法匹配选项'), 'color:#FF9800');
                         this._llmLastQuestionKey = '';
                         if (!this._interactionBlocked) this._blockInteractionForManual(found);
+                        return;
                     }
-                );
+                    this._applyInteractionAnswer(found, options, result);
+                });
             },
-            _applyInteractionAnswer(found, options, responseText) {
-                const answer = this._llmExtractAnswer(responseText);
-                const chosen = this._llmPickOption(options, answer);
-                if (!chosen || !chosen.el) {
-                    console.warn('%c[LLM] 无法解析答案（原始返回: ' + String(responseText || '').slice(0, 160) + '），回退为人工处理', 'color:#FF9800');
+            _applyInteractionAnswer(found, options, result) {
+                // F37（V3.6 补丁）：支持多选（picked 可多个）；点击后仍走原有「提交/继续」逻辑。
+                const picked = (result && result.picked) || [];
+                const answer = String((result && result.answer) || '');
+                if (!picked.length || !picked[0].el) {
+                    console.warn('%c[LLM] 无法解析答案（原始返回: ' + String((result && result.raw) || '').slice(0, 160) + '），回退为人工处理', 'color:#FF9800');
                     this._llmLastQuestionKey = '';
                     if (!this._interactionBlocked) this._blockInteractionForManual(found);
                     return;
                 }
                 this._llmAnswersThisSession++;
-                this._llmLastAnswer = {
-                    q: String(found.text || '').slice(0, 40),
-                    a: String(answer || '').slice(0, 20),
-                };
-                try {
-                    if (typeof chosen.el.click === 'function') chosen.el.click();
-                    else if (chosen.el.querySelector) {
-                        const input = chosen.el.querySelector('input[type=radio], input[type=checkbox]');
-                        if (input && typeof input.click === 'function') input.click();
+                this._llmLastAnswer = { q: String(found.text || '').slice(0, 40), a: answer.slice(0, 20) };
+                picked.forEach((chosen) => {
+                    try {
+                        if (typeof chosen.el.click === 'function') chosen.el.click();
+                        else if (chosen.el.querySelector) {
+                            const input = chosen.el.querySelector('input[type=radio], input[type=checkbox]');
+                            if (input && typeof input.click === 'function') input.click();
+                        }
+                    } catch (e) {
+                        console.warn('%c[LLM] 选项点击失败：' + (e && e.message ? e.message : String(e)), 'color:#FF9800');
                     }
-                } catch (e) {
-                    console.warn('%c[LLM] 选项点击失败：' + (e && e.message ? e.message : String(e)), 'color:#FF9800');
-                }
-                console.log('%c[LLM] 已选择答案 ' + answer + '（' + String(chosen.text || '').slice(0, 40) + '）', 'color:#9C27B0');
+                });
+                console.log('%c[LLM] 已选择答案 ' + answer + '（' + picked.map((c) => String(c.text || '').slice(0, 20)).join(' / ') + '）', 'color:#9C27B0');
+                this._answerCacheSet(String(found.questionText || found.text || ''), 'choice', answer);
                 this._guiRefreshStatus(true);
                 const submitEl = this._findInteractionSubmit(found);
                 if (!submitEl) {
@@ -3956,26 +4022,24 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                     return;
                                 }
                             }
-                            this._llmRequest(
-                                this._llmBuildPayload(this._llmBuildMessages(questionText, options)),
-                                (content) => {
-                                    const answer = this._llmExtractAnswer(content);
-                                    this._answerCacheSet(questionText, 'choice', answer);
-                                    const chosenList = this._llmPickOptions(options, answer);
-                                    if (!chosenList.length) {
-                                        // F32：失败时打印足够诊断信息（答案原文/LLM 原始输出/选项快照），便于人工定位。
-                                        console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题无法匹配选项：answer=' + JSON.stringify(String(answer || '').slice(0, 40))
-                                            + ' ｜ llmRaw=' + JSON.stringify(String(content || '').slice(0, 120))
-                                            + ' ｜ options=' + options.map((o) => o.letter + ':' + String(o.text || '').slice(0, 16)).join(' | '), 'color:#FF9800');
-                                        giveUp('第 ' + (qi + 1) + ' 题无法匹配选项');
-                                        return;
-                                    }
-                                    chosenList.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
-                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + chosenList.map((c) => String(c.text || '').slice(0, 24)).join(' / '), 'color:#9C27B0');
-                                    askNext(qi + 1);
-                                },
-                                (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
-                            );
+                            const isMultiChoice = /多选/.test(String(q.typeLabel || ''))
+                                || q.optionEls.some((o) => { try { return !!(o.el && o.el.querySelector && o.el.querySelector('input[type=checkbox]')); } catch (e) { return false; } });
+                            this._llmAskChoice(questionText, options, isMultiChoice, (err, result) => {
+                                if (err || !result || !result.picked.length) {
+                                    // F37：失败时打印完整诊断（答案原文/LLM 原始输出/选项快照/是否多选），便于人工定位。
+                                    console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题作答失败：' + (err ? err.message : '无法匹配选项')
+                                        + (isMultiChoice ? '（多选）' : '')
+                                        + ' ｜ answer=' + JSON.stringify(String((result && result.answer) || '').slice(0, 40))
+                                        + ' ｜ llmRaw=' + JSON.stringify(String((result && result.raw) || '').slice(0, 140))
+                                        + ' ｜ options=' + options.map((o) => o.letter + ':' + String(o.text || '').slice(0, 16)).join(' | '), 'color:#FF9800');
+                                    giveUp('第 ' + (qi + 1) + ' 题无法匹配选项');
+                                    return;
+                                }
+                                this._answerCacheSet(questionText, 'choice', result.answer);
+                                result.picked.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
+                                console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + result.picked.map((c) => String(c.text || '').slice(0, 24)).join(' / '), 'color:#9C27B0');
+                                askNext(qi + 1);
+                            });
                         });
                     };
                     askNext(0);

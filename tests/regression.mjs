@@ -19,6 +19,7 @@
  *   F34 font-cxsecret glyf 哈希解密（移植上游 Samueli924/chaoxing，真实字体 + 真实表）
  *   F35 选项匹配改为上游降级链（normalize_text/clean_res/is_subsequence/SequenceMatcher.ratio）
  *   F36 章节学习次数（移植上游 _extract_and_send_setlog：studentstudyAjax → setlog）
+ *   F37 多选作答支持（占位符拒绝/多字母/自动重试）+ 互动题等待在途请求
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1115,6 +1116,46 @@ test('F36-1 章节学习次数：按上游流程请求 ajax 并触发 setlog', a
     check('F36-1 请求 studentstudyAjax 两次', ajaxCalls === 2, 'ajax=' + ajaxCalls + ' calls=' + JSON.stringify(calls.slice(0, 4)));
     check('F36-1 触发 setlog 两次', setlogCalls === 2, 'setlog=' + setlogCalls);
     check('F36-1 打印完成日志', env.xt.has('[章节次数] 已发送 2 次 setlog'), '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F37 多选作答支持 + 解析重试 + 互动题等待在途请求（真机：第 9 题模板回显/多选卡死）
+// ---------------------------------------------------------------------------
+
+test('F37-1 答案解析：拒绝模板占位符、支持多选字母', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    check('F37-1 占位符「选项字母」被拒绝', app._llmExtractAnswer('{"answer":"选项字母"}') === '', app._llmExtractAnswer('{"answer":"选项字母"}'));
+    const multi1 = app._llmExtractAnswer('{"answer":"B、C"}', { multi: true });
+    check('F37-1 多选 JSON → BC', multi1 === 'BC', multi1);
+    const multi2 = app._llmExtractAnswer('答案是：A和C', { multi: true });
+    check('F37-1 文本「A和C」→ AC', multi2 === 'AC', multi2);
+    const multi3 = app._llmExtractAnswer('推理……最终应选 B 和 D', { multi: true });
+    check('F37-1 多选尾部兜底 → BD', multi3 === 'BD', multi3);
+    const single = app._llmExtractAnswer('{"answer":"B"}');
+    check('F37-1 单选不受影响 → B', single === 'B', single);
+    app.destroy();
+});
+
+test('F37-2 选择题重试：首次坏输出 → 严格模式重试成功', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const opts = [{ el: {}, text: 'A 甲', letter: 'A' }, { el: {}, text: 'B 乙', letter: 'B' }];
+    let calls = 0;
+    app.setLlmTransport((o) => {
+        calls++;
+        const body = calls === 1
+            ? 'We need answer multiple choice. Need determine correct descriptions. Need output JSON object with answer maybe multiple '
+            : '{"answer":"B"}';
+        try { o.onload(200, JSON.stringify({ choices: [{ message: { content: body } }] })); } catch (e) { /* ignore */ }
+        return null;
+    });
+    let out = null;
+    app._llmAskChoice('题目', opts, false, (err, result) => { out = { err: err && err.message, result: result }; });
+    await env.advance(5000);
+    check('F37-2 触发重试（共 2 次请求）', calls === 2, 'calls=' + calls);
+    check('F37-2 重试后命中 B', !!(out && out.result && out.result.picked.length === 1 && out.result.picked[0].letter === 'B'), JSON.stringify(out && out.result && out.result.picked));
     app.destroy();
 });
 
