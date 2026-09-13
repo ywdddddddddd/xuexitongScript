@@ -921,7 +921,7 @@ test('F24-1 关闭并发时 keeper 不额外播放其他任务点视频', async 
     app.destroy();
 });
 
-test('F24-4 并发默认开启：boot 后自动拉起副车道', async () => {
+test('F24-4 并发默认关闭（实测交错播放无提速，V3.6 补丁暂不默认开启）', async () => {
     const html = tree(chapterSpecs(['1.1']))
         + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
         + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
@@ -933,8 +933,8 @@ test('F24-4 并发默认开启：boot 后自动拉起副车道', async () => {
     const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
     const app = await env.boot();
     await env.advance(2500);
-    check('F24-4 默认配置 concurrentPlayback=true', app.configs.concurrentPlayback === true, String(app.configs.concurrentPlayback));
-    check('F24-4 默认即拉起副车道', v2.__calls.play >= 1, 'calls=' + v2.__calls.play);
+    check('F24-4 默认配置 concurrentPlayback=false', app.configs.concurrentPlayback === false, String(app.configs.concurrentPlayback));
+    check('F24-4 默认不拉起副车道', v2.__calls.play === 0, 'calls=' + v2.__calls.play);
     app.destroy();
 });
 

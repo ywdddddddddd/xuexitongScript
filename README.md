@@ -71,7 +71,7 @@ resumeMaxAttemptsPerUnit: 5
 userPauseWindowMs: 2500
 autoAdvanceNoVideo: false
 maxConsecutiveNoVideoAdvances: 3
-concurrentPlayback: true
+concurrentPlayback: false
 concurrentLanes: 2
 videoFrameMaxDepth: 4
 interactionGuard: true
@@ -129,7 +129,7 @@ llmWorkWaitMs: 90000
 - `llmWorkWaitMs`（默认 90000）：提交后等待任务点标记完成的最长时间；工作页出现「待批阅/已完成/已提交」同样视为提交成功；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。V3.6 补丁（F23）：若页面标注「完成条件…观看时长需 ≥ 总时长的 90%」，脚本优先采用页面上的比例；多任务点小节里对**已获完成标记**的任务点提前交接，省掉片尾无效播放。
-- `concurrentPlayback`（默认 **true**，V3.6 补丁 F33 起默认开启；F24 引入，实验特性）：同节点多视频并发播放。开启后脚本在小节内错开启动最多 `concurrentLanes` 路视频任务点，并周期性把被平台暂停的副车道重新拉起（副车道自动静音）。真机实测平台会周期性暂停副车道、重播可拉回，且并发的第二路任务点可被平台正常标记完成。**实验特性**：会并发播放同一小节的多个视频，平台会周期性暂停副车道（脚本自动重播拉回）。默认开启以提升吞吐；如遇异常或想保守运行可设 `concurrentPlayback = false`。
+- `concurrentPlayback`（默认 **false**，V3.6 补丁 F37b 起关闭；F24 引入，实验特性）：同节点多视频并发播放。开启后脚本在小节内错开启动最多 `concurrentLanes` 路视频任务点，并周期性把被平台暂停的副车道重新拉起（副车道自动静音）。真机实测平台会周期性暂停副车道、重播可拉回，且并发的第二路任务点可被平台正常标记完成。**实验特性**：实测平台会仲裁暂停副车道（表现为交错播放、无实质提速），已改为默认关闭；如仍想试验可设 `concurrentPlayback = true`。
 - `concurrentLanes`（默认 2）：并发路数上限（2~4）。
 - `laneKeeperIntervalMs` / `laneMaxReplaysPerUnit`（默认 3000ms / 240 次）：副车道保活检查间隔与每小节重播上限。
 - `pauseGuard`（默认 **true**，V3.6 新增）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停。只拦截「最近 1.5 秒无点击/按键」的暂停调用；用户主动点击暂停仍正常生效。如遇异常可设为 `false` 关闭。

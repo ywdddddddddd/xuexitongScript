@@ -118,7 +118,7 @@
                 videoTaskFrameMaxCount: 12,
                 // F24（V3.6 补丁，实验特性）：同节点多视频并发播放（错开启动 + 副车道保活重播）。
                 // 真机实测：平台会周期性暂停副车道，重播可拉回；并发的第二路 206/218s 被平台正常标记完成。
-                concurrentPlayback: true,
+                concurrentPlayback: false,
                 concurrentLanes: 2,
                 laneKeeperIntervalMs: 3000,
                 laneMaxReplaysPerUnit: 240,
