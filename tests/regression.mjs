@@ -23,6 +23,7 @@
  *   F38 视频任务点全部完成时不再按「组件未加载」重试（真机第7章第3节死循环）
  *   F39 作答判定支持平台选中态（aria-checked/class）+ 单选护栏 + 提交按钮识别放宽
  *   F40 题目预检放宽：4~5 字短题（带问号/选项）不再误锁（真机：眶下孔位于？）
+ *   F41 选项点击后校验选中态并自动重试（真机：第 1 题点击丢失 → 10/11 上锁）
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1230,6 +1231,40 @@ test('F40-1 短题干（4~5 字）带问号/选项时不再误锁', async () => 
     check('F40-1 纯 UI 文案仍拒绝（取消静音）', app._isQuestionSane('取消静音', choice).ok === false, '');
     check('F40-1 极短无特征仍拒绝（3 字）', app._isQuestionSane('眶下孔', choice).ok === false, '');
     check('F40-1 正常长题干不受影响', app._isQuestionSane('【单选题】以下关于种植体材料生物相容性的说法正确的是？', choice).ok === true, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F41 选项点击校验重试（真机：第 1 题点击未生效，有效作答 10/11 上锁）
+// ---------------------------------------------------------------------------
+
+test('F41-1 选中态判定：aria / class / input / 未选中', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const doc = env.window.document;
+    const mk = (html) => { const li = doc.createElement('li'); li.innerHTML = html; if (html.indexOf('aria') >= 0) li.setAttribute('aria-checked', 'true'); return li; };
+    check('F41-1 aria-checked=true', app._optionLooksSelected(mk('aria')) === true, '');
+    check('F41-1 class=cur', app._optionLooksSelected(mk('<span class="x"></span>') && (() => { const el = doc.createElement('li'); el.className = 'cur'; return el; })()) === true, '');
+    check('F41-1 input:checked', (() => { const li = doc.createElement('li'); li.innerHTML = '<input type="radio" checked>'; return app._optionLooksSelected(li) === true; })(), '');
+    check('F41-1 未选中为 false', app._optionLooksSelected((() => { const el = doc.createElement('li'); el.className = 'font-cxsecret before-after'; return el; })()) === false, '');
+    app.destroy();
+});
+
+test('F41-2 点击校验重试：第 2 次点击才生效 → 成功回调；始终不生效 → 明确报错', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    let clicks = 0;
+    const el = { className: '', __sel: false, getAttribute: () => (el.__sel ? 'true' : 'false'), querySelector: () => null, click: () => { clicks++; if (clicks >= 2) el.__sel = true; } };
+    let r1 = 'pending';
+    app._clickWithVerification([{ el: el }], (err) => { r1 = err ? 'err:' + err.message : 'ok'; });
+    await env.advance(3000);
+    check('F41-2 重试后校验通过', r1 === 'ok' && clicks >= 2, 'r=' + r1 + ' clicks=' + clicks);
+    let clicks2 = 0;
+    const el2 = { className: '', getAttribute: () => 'false', querySelector: () => null, click: () => { clicks2++; } };
+    let r2 = 'pending';
+    app._clickWithVerification([{ el: el2 }], (err) => { r2 = err ? err.message : 'ok'; });
+    await env.advance(3000);
+    check('F41-2 始终无效时明确报错', String(r2).indexOf('未生效') >= 0 && clicks2 >= 3, 'r=' + r2 + ' clicks=' + clicks2);
     app.destroy();
 });
 

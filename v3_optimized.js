@@ -3069,16 +3069,8 @@
                 }
                 this._llmAnswersThisSession++;
                 this._llmLastAnswer = { q: String(found.text || '').slice(0, 40), a: answer.slice(0, 20) };
-                picked.forEach((chosen) => {
-                    try {
-                        if (typeof chosen.el.click === 'function') chosen.el.click();
-                        else if (chosen.el.querySelector) {
-                            const input = chosen.el.querySelector('input[type=radio], input[type=checkbox]');
-                            if (input && typeof input.click === 'function') input.click();
-                        }
-                    } catch (e) {
-                        console.warn('%c[LLM] 选项点击失败：' + (e && e.message ? e.message : String(e)), 'color:#FF9800');
-                    }
+                this._clickWithVerification(picked, (clickErr) => {
+                    if (clickErr) console.warn('%c[LLM] 互动题选项点击未生效：' + clickErr.message, 'color:#FF9800');
                 });
                 console.log('%c[LLM] 已选择答案 ' + answer + '（' + picked.map((c) => String(c.text || '').slice(0, 20)).join(' / ') + '）', 'color:#9C27B0');
                 this._answerCacheSet(String(found.questionText || found.text || ''), 'choice', answer);
@@ -3816,6 +3808,38 @@
                 this._workLockReason = reason;
                 console.warn('%c[作业] ⛔ 已上锁：' + reason + '（拒绝自动提交，请人工处理）' + (detail ? ' ｜ ' + String(detail).slice(0, 100) : ''), 'color:#F44336;font-weight:bold');
             },
+            _optionLooksSelected(el) {
+                // F41（V3.6 补丁）：平台选项选中态识别（<li role=radio aria-checked onclick=addChoice>，无 input）。
+                if (!el) return false;
+                try {
+                    if (el.querySelector && el.querySelector('input:checked')) return true;
+                    if (el.getAttribute && el.getAttribute('aria-checked') === 'true') return true;
+                    const cls = String(el.className || '');
+                    if (/(^|\s)(cur|current|active|selected|checked|choose|chosen|on)(\s|$)/i.test(cls)) return true;
+                    if (el.querySelector && el.querySelector('[class*="cur"],[class*="activ"],[class*="select"],[class*="check"]')) return true;
+                    const label = el.querySelector ? el.querySelector('label') : null;
+                    if (label && /(^|\s)(cur|current|active|selected|checked|on)(\s|$)/i.test(String(label.className || ''))) return true;
+                    return false;
+                } catch (e) {
+                    return false;
+                }
+            },
+            _clickWithVerification(picked, cb) {
+                // F41：点击选项后校验是否真的选中；平台偶发丢点击（真机：第 1 题点了没生效 → 有效作答 10/11 上锁）。
+                const done = typeof cb === 'function' ? cb : function () {};
+                const list = Array.isArray(picked) ? picked.filter((c) => c && c.el) : [];
+                if (!list.length) { done(new Error('无可点击选项')); return; }
+                let attempt = 0;
+                const tryClick = () => {
+                    attempt++;
+                    const missing = list.filter((c) => !this._optionLooksSelected(c.el));
+                    if (!missing.length) { done(null); return; }
+                    if (attempt > 3) { done(new Error('选项点击未生效')); return; }
+                    missing.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
+                    this._schedule(tryClick, 350);
+                };
+                tryClick();
+            },
             // F18：提交前空值守卫——统计题目的有效作答（写作题看编辑器正文，选择题看是否有选中项）。
             _workHasAnswer(quiz, questions) {
                 let filled = 0;
@@ -4059,9 +4083,11 @@
                                     return;
                                 }
                                 this._answerCacheSet(questionText, 'choice', result.answer);
-                                result.picked.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
-                                console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + result.picked.map((c) => String(c.text || '').slice(0, 24)).join(' / '), 'color:#9C27B0');
-                                askNext(qi + 1);
+                                this._clickWithVerification(result.picked, (clickErr) => {
+                                    if (clickErr) console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题选项点击未生效（' + clickErr.message + '），继续下一题', 'color:#FF9800');
+                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + result.picked.map((c) => String(c.text || '').slice(0, 24)).join(' / '), 'color:#9C27B0');
+                                    askNext(qi + 1);
+                                });
                             });
                         });
                     };
