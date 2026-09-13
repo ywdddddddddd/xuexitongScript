@@ -3813,10 +3813,15 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const t = raw.replace(/【[^】]{1,10}】/g, '').replace(/\s+/g, ' ').trim();
                 if (!t) return { ok: false, reason: '题目文本为空' };
                 if (t.length < 8) return { ok: false, reason: '题目文本过短（' + t.length + ' 字）' };
-                if (/填写答案|段落格式|字体|字号|点击上传|wordNum|edui|取消静音|播放速度|加载完毕/.test(t)) return { ok: false, reason: '题目疑似编辑器/播放器界面文案' };
+                if (/填写答案|段落格式|字体|字号|点击上传|wordNum|edui|取消静音|播放速度|加载完毕|确定|取消|提交|返回|上一题|下一题|继续观看/.test(t)) return { ok: false, reason: '题目疑似编辑器/播放器界面文案' };
                 if (/^[0-9\s.、．]+$/.test(t)) return { ok: false, reason: '题目无有效文字内容' };
                 const cjkCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
-                if (cjkCount < 6) return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
+                if (cjkCount < 4) return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
+                // F40（V3.6 补丁）：4~5 字的短题目只要带疑问特征或选择题选项就是合法题（真机：「5【单选题】眶下孔位于？」被误锁）。
+                if (cjkCount < 6 && !/[?？]/.test(t)
+                    && !(question && !question.isShortAnswer && (question.optionEls || []).length >= 2)) {
+                    return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
+                }
                 if (t.length < 12 && !/[?？]/.test(t)) return { ok: false, reason: '题目过短且无疑问特征' };
                 if (question && !question.isShortAnswer) {
                     const ops = (question.optionEls || []).length;
