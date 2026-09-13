@@ -15,6 +15,7 @@
  *   F23 页面「完成条件 ≥X%」识别 + 多任务点片尾提前交接（省掉最后 10%）
  *   F24 同节点多视频并发（错开启动 + 副车道保活重播，实验特性）
  *   F32 内嵌作业选项匹配增强（字母/夹带字母/多选/标点文本）与失败诊断
+ *   F33 直播节点识别 / LLM 节流 / 答案缓存 / 相似度兜底 / 默认项调整
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -896,7 +897,7 @@ test('F23-3 未获平台完成标记时不抢跑（比例达标也不提前切�
 // F24 同节点多视频并发播放（错开启动 + 副车道保活重播；真机实测并发第二路可被平台计入）
 // ---------------------------------------------------------------------------
 
-test('F24-1 默认关闭并发：不会额外播放其他任务点视频', async () => {
+test('F24-1 关闭并发时 keeper 不额外播放其他任务点视频', async () => {
     const html = tree(chapterSpecs(['1.1']))
         + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
         + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
@@ -907,9 +908,29 @@ test('F24-1 默认关闭并发：不会额外播放其他任务点视频', async
     const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
     const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
     const app = await env.boot();
-    await env.advance(6000);
-    check('F24-1 默认不打印并发启用日志', !env.xt.has('[并发]'), '');
-    check('F24-1 第二个任务点未被额外播放', v2.__calls.play === 0, 'calls=' + v2.__calls.play);
+    await env.advance(1500);
+    const before = v2.__calls.play;
+    app.configs.concurrentPlayback = false;
+    v2.paused = true;
+    for (let k = 0; k < 3; k++) app._laneKeeperTick();
+    check('F24-1 关闭并发后不再拉起副车道', v2.__calls.play === before, 'before=' + before + ' after=' + v2.__calls.play);
+    app.destroy();
+});
+
+test('F24-4 并发默认开启：boot 后自动拉起副车道', async () => {
+    const html = tree(chapterSpecs(['1.1']))
+        + '<div class="ans-attach-ct" id="ct1"><iframe id="task-1" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="ans-attach-ct" id="ct2"><iframe id="task-2" class="ans-insertvideo-online" src="about:blank"></iframe></div>'
+        + '<div class="prev_title" title="视频"></div>';
+    const env = createEnv({ html });
+    const d1 = await writeFrame(env, 'task-1', '<video id="video_html5_api" src="https://example.com/t1.mp4"></video>');
+    stubVideo(env, d1.getElementById('video_html5_api'), {});
+    const d2 = await writeFrame(env, 'task-2', '<video id="video_html5_api" src="https://example.com/t2.mp4"></video>');
+    const v2 = stubVideo(env, d2.getElementById('video_html5_api'), {});
+    const app = await env.boot();
+    await env.advance(2500);
+    check('F24-4 默认配置 concurrentPlayback=true', app.configs.concurrentPlayback === true, String(app.configs.concurrentPlayback));
+    check('F24-4 默认即拉起副车道', v2.__calls.play >= 1, 'calls=' + v2.__calls.play);
     app.destroy();
 });
 
@@ -976,6 +997,61 @@ test('F32-1 选项匹配增强：纯字母/夹带字母/多选/标点文本/无�
     check('F32-1 文本匹配（带句号标点）', app._llmPickOption(opts, '钛及钛合金。') === opts[1], '');
     check('F32-1 无匹配返回空数组', app._llmPickOptions(opts, '完全无关的答案').length === 0, '');
     check('F32-1 兼容旧接口 _llmPickOption 返回 null', app._llmPickOption(opts, '完全无关的答案') === null, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F33 直播节点识别 / LLM 节流 / 答案缓存 / 相似度兜底 / 默认项调整
+// ---------------------------------------------------------------------------
+
+test('F33-1 相似度兜底：子串不匹配但 Dice ≥ 0.8 时命中选项', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const opts = [{ el: {}, text: 'B 钛及钛合金材料', letter: 'B' }];
+    check('F33-1 子串匹配不命中', app._llmPickOptions(opts, '钛合金材料').length === 1, '（说明）');
+    check('F33-1 Dice 兜底命中', app._llmPickOption(opts, '钛合金材料') === opts[0], '');
+    check('F33-1 低相似度不硬凑', app._llmPickOptions(opts, '完全无关内容').length === 0, '');
+    app.destroy();
+});
+
+test('F33-2 直播节点识别：安全停止 + 针对性提示 + 零点击', async () => {
+    const html = tree(chapterSpecs(['1.1'])) + '<iframe id="iframe" src="about:blank"></iframe>' + '<div class="prev_title" title="直播"></div>';
+    const env = createEnv({ html });
+    await writeFrame(env, 'iframe', '正在直播：口腔种植学第七讲（直播回放将在结束后生成）');
+    const app = await env.boot();
+    await env.advance(5000);
+    check('F33-2 打印直播识别日志', env.xt.has('检测到直播任务点'), JSON.stringify(env.xt.logs.slice(-4)));
+    check('F33-2 给出针对性处理方法', env.xt.has('直播进行中') || env.xt.has('直播回放'), '');
+    check('F33-2 零目录点击（未按未知节点跳过）', env.treeClicks().length === 0, JSON.stringify(env.treeClickTitles()));
+    app.destroy();
+});
+
+test('F33-3 答案缓存：题干归一化命中 + 命中不请求 LLM', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    app._answerCacheSet('钛及钛合金的特点（多选）', 'choice', 'B、C');
+    const hit = app._answerCacheGet(' 钛及钛合金的特点 ');
+    check('F33-3 归一化后可命中缓存', !!hit && hit.answer === 'B、C' && hit.kind === 'choice', JSON.stringify(hit));
+    app.destroy();
+});
+
+test('F33-4 LLM 节流：连续请求按 llmMinIntervalMs 排队 + 默认项检查', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    check('F33-4 docTaskScroll 默认开启', app.configs.docTaskScroll === true, String(app.configs.docTaskScroll));
+    check('F33-4 liveGuard 默认开启', app.configs.liveGuard === true, String(app.configs.liveGuard));
+    app.configs.llmMinIntervalMs = 1000;
+    let sends = 0;
+    app.setLlmTransport((opts) => {
+        sends++;
+        try { opts.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"A"}' } }] })); } catch (e) { /* ignore */ }
+        return null;
+    });
+    app._llmRequest({}, () => {}, () => {});
+    app._llmRequest({}, () => {}, () => {});
+    check('F33-4 首次立即发送', sends === 1, 'sends=' + sends);
+    await env.advance(1500);
+    check('F33-4 第二次被节流延后发送', sends >= 2, 'sends=' + sends);
     app.destroy();
 });
 

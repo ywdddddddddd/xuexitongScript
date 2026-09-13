@@ -30,13 +30,15 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F32 | 内嵌作业选项匹配偶发失败（真机：第 9 题无法匹配选项 → 整份作业放弃并卡住） | 真机演练 | 选项匹配增强：纯字母 / 夹带字母（选B、B选项、B（xxx））/ 多选字母（B、C）/ 去标点括号的包含匹配；匹配失败时打印 answer、LLM 原始输出与选项快照，便于人工定位 |
 
+| F33 | 直播节点落入未知节点流程；LLM 无节流无缓存降级；选项匹配缺相似度兜底 | 用户优化提案 | 直播节点识别（标题/内容帧/全文无 video）→ 安全停止 + 针对性提示；`llmMinIntervalMs` 最小间隔+抖动；答案缓存（题干→答案，内存 LRU 500）实现 LLM→缓存→人工 降级链；选项相似度兜底（Dice ≥ 0.8）；`docTaskScroll`/`concurrentPlayback` 改为默认开启 |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
 - [v3_optimized.user.js](v3_optimized.user.js) —— Tampermonkey 油猴版（构建产物）
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F32，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F33，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
@@ -62,6 +64,8 @@ resumeMaxAttemptsPerUnit: 5
 userPauseWindowMs: 2500
 autoAdvanceNoVideo: false
 maxConsecutiveNoVideoAdvances: 3
+concurrentPlayback: true
+concurrentLanes: 2
 videoFrameMaxDepth: 4
 interactionGuard: true
 interactionPollMs: 1500
@@ -73,7 +77,7 @@ videoCompleteRatio: 0.9
 pauseGuard: true
 cxSecretDecode: true
 workSanityLock: true
-docTaskScroll: false
+docTaskScroll: true
 docTaskScrollStepMs: 800
 docTaskMaxMs: 240000
 docTaskWaitMs: 45000
@@ -86,6 +90,8 @@ llmModel: 'deepseek-flash'
 llmMaxTokens: 4096
 llmJsonMode: true
 llmTimeoutMs: 30000
+llmMinIntervalMs: 800
+liveGuard: true
 llmMaxAnswersPerSession: 50
 llmAutoSubmit: false
 llmChapterTest: false
@@ -106,6 +112,8 @@ llmWorkWaitMs: 90000
 - `taskDialogClickCooldownMs` / `taskDialogMaxClicksPerUnit`（默认 8000ms / 3 次）：处理平台「当前章节还有任务点未完成」弹窗时的冷却与每小节次数上限，避免反复点击（#43 #54）。
 - `guiEnabled`（默认 **true**）：右上角可视化监控面板，显示播放状态、进度、LLM 状态与实时日志；纯本地 DOM，不产生网络请求。V3.6 补丁（GUI v2）：卡片式深色面板、运行状态指示灯、视频进度条与平滑动画、开/关按钮配色、更大的点击区域与悬停反馈。
 - `llmEnabled`（默认 **false**）：是否允许调用大模型自动选择互动题答案。开启前先配置密钥（面板「设置 Key」或 `app.setLlmKey(...)`，密钥只存内存、绝不落盘）。
+- `llmMinIntervalMs`（默认 **800**，V3.6 补丁 F33）：LLM 请求最小间隔（含 0.7~1.3 随机抖动），连续作答时自动排队；防 429 与服务端风控。
+- `liveGuard`（默认 **true**，V3.6 补丁 F33）：识别直播任务点；命中时安全停止并给出针对性提示（绝不当作未知节点自动跳过）。
 - `llmMaxTokens`（默认 **4096**）：实测推理 token 可达 1600+，1024 会耗尽配额导致空响应（`finish_reason=length`），不建议调小。
 - `llmJsonMode`（默认 **true**）：请求体带 `response_format:{"type":"json_object"}`，约束模型只输出 JSON；自定义端点不支持该参数时设为 `false`。
 - `llmAutoSubmit`（默认 **false**）：半自动档——脚本只替你选定答案，提交/继续按钮留给你点；设为 `true` 才会自动提交。
@@ -114,13 +122,13 @@ llmWorkWaitMs: 90000
 - `llmWorkWaitMs`（默认 90000）：提交后等待任务点标记完成的最长时间；工作页出现「待批阅/已完成/已提交」同样视为提交成功；超时按未完成处理并停止前进（不跳过）。
 - `videoTaskFrameMaxDepth` / `videoTaskFrameMaxCount`（默认 4 / 12）：小节内视频任务点 iframe 的递归深度与数量上限，带自我保护。
 - `videoCompleteRatio`（默认 **0.9**，V3.6 新增）：片尾停滞保护比例——已播放达到该比例且平台已标记任务点完成时，视同片尾完成直接推进，避免平台片尾主动暂停导致恢复次数耗尽后假死。V3.6 补丁（F23）：若页面标注「完成条件…观看时长需 ≥ 总时长的 90%」，脚本优先采用页面上的比例；多任务点小节里对**已获完成标记**的任务点提前交接，省掉片尾无效播放。
-- `concurrentPlayback`（默认 **false**，V3.6 补丁 F24，实验特性）：同节点多视频并发播放。开启后脚本在小节内错开启动最多 `concurrentLanes` 路视频任务点，并周期性把被平台暂停的副车道重新拉起（副车道自动静音）。真机实测平台会周期性暂停副车道、重播可拉回，且并发的第二路任务点可被平台正常标记完成。**有风控风险，默认关闭，确认接受风险再开启**。
+- `concurrentPlayback`（默认 **true**，V3.6 补丁 F33 起默认开启；F24 引入，实验特性）：同节点多视频并发播放。开启后脚本在小节内错开启动最多 `concurrentLanes` 路视频任务点，并周期性把被平台暂停的副车道重新拉起（副车道自动静音）。真机实测平台会周期性暂停副车道、重播可拉回，且并发的第二路任务点可被平台正常标记完成。**实验特性**：会并发播放同一小节的多个视频，平台会周期性暂停副车道（脚本自动重播拉回）。默认开启以提升吞吐；如遇异常或想保守运行可设 `concurrentPlayback = false`。
 - `concurrentLanes`（默认 2）：并发路数上限（2~4）。
 - `laneKeeperIntervalMs` / `laneMaxReplaysPerUnit`（默认 3000ms / 240 次）：副车道保活检查间隔与每小节重播上限。
 - `pauseGuard`（默认 **true**，V3.6 新增）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停。只拦截「最近 1.5 秒无点击/按键」的暂停调用；用户主动点击暂停仍正常生效。如遇异常可设为 `false` 关闭。
 - `cxSecretDecode`（默认 **true**，V3.6 新增）：自动解密平台的 font-cxsecret 反copy字体（用系统 Noto Sans SC/思源黑体同字形做位图匹配），解密题干与选项后再交给 LLM 作答/匹配；无字体或无 Canvas 环境自动跳过。
 - `workSanityLock`（默认 **true**，V3.6 新增）：题目合格性预检 + 提交锁。给 AI 发请求前先校验题目（排除界面文案/过短/选项不足等异常），异常或未全部作答时**上锁拒绝提交**，交人工处理（修复真机演练中「编辑器外壳被当选项 → 提交空值」事故）。
-- `docTaskScroll`（默认 **false**，V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）；开启后自动把文档滚动到底部并等待平台标记完成。
+- `docTaskScroll`（默认 **true**，V3.6 补丁 F33 起默认开启；V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅：自动把文档滚动到底部并等待平台标记完成。如需关闭（例如担心翻页节奏），设 `docTaskScroll = false`，此时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）。
 ## 使用方法
 
 ### 方法一：浏览器控制台

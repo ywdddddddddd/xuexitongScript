@@ -132,7 +132,7 @@
                 videoTaskFrameMaxCount: 12,
                 // F24（V3.6 补丁，实验特性）：同节点多视频并发播放（错开启动 + 副车道保活重播）。
                 // 真机实测：平台会周期性暂停副车道，重播可拉回；并发的第二路 206/218s 被平台正常标记完成。
-                concurrentPlayback: false,
+                concurrentPlayback: true,
                 concurrentLanes: 2,
                 laneKeeperIntervalMs: 3000,
                 laneMaxReplaysPerUnit: 240,
@@ -147,7 +147,7 @@
                 // 一律不提交并上锁，交人工处理（真机教训：编辑器外壳被当选项 → 提交了 8 次空值）。
                 workSanityLock: true,
                 // F13（V3.6）：文档任务点（PDF/PPT/教案）自动翻阅。默认关闭；开启后自动滚动文档到底部并等待平台标记完成。
-                docTaskScroll: false,
+                docTaskScroll: true,
                 docTaskScrollStepMs: 800,
                 // F13 修正：懒加载文档越滚越长，步数上限会误判「到底」；改为时间上限 + 「到底且高度稳定」双条件。
                 docTaskMaxMs: 240000,
@@ -166,6 +166,10 @@
                 // true=请求体带 response_format:{"type":"json_object"}，约束模型只输出 JSON；自定义端点不支持时设为 false。
                 llmJsonMode: true,
                 llmTimeoutMs: 30000,
+                // F33（V3.6 补丁）：LLM 请求最小间隔 + 抖动（防 429 / 防风控，对齐上游 RateLimiter）。
+                llmMinIntervalMs: 800,
+                // F33：直播任务点识别开关（识别到直播节点时安全停止并给出针对性提示，绝不当作未知节点跳过）。
+                liveGuard: true,
                 // 有界防循环（思路同 PR #53 的 10 次上限），超出后回退人工。
                 llmMaxAnswersPerSession: 50,
                 // false=只自动选择答案，提交按钮留给用户；true=自动选择并提交。
@@ -787,6 +791,11 @@
                     }
                     const el = this._getVideoEl();
                     if (el == null) {
+                        // F33：直播节点优先识别（直播不自动处理，也不能被 autoAdvanceNoVideo 当未知节点跳过）。
+                        if (this._isLiveNode()) {
+                            this._stopForLiveNode();
+                            return;
+                        }
                         if (this._currentStepTitle() === '视频') {
                             // F21（V3.6 补丁）：空视频节点——老师没上传内容时平台内容帧只有「暂无内容」，
                             // 不再按「视频组件尚未加载完成」重试到触顶，而是转入既有的无视频节点流程：
@@ -923,6 +932,43 @@
                 };
                 visit(typeof document === 'undefined' ? null : document, 0);
                 return { total: total, unfinished: unfinished };
+            },
+            _isLiveNode() {
+                // F33（V3.6 补丁）：直播任务点识别 —— 直播节点此前会落入无视频流程被当未知节点处理。
+                // 判定：标题含「直播」，或内容帧/子帧出现直播文案或 live 模块，且全页没有真实 video（避免误判）。
+                if (!this.configs.liveGuard) return false;
+                try {
+                    if (/直播/.test(String(this._currentStepTitle() || ''))) return true;
+                    let liveText = false;
+                    let hasVideo = false;
+                    const scan = (doc, depth) => {
+                        if (depth > 3 || hasVideo) return;
+                        try { if (doc.querySelector && doc.querySelector('video')) { hasVideo = true; return; } } catch (e) { /* ignore */ }
+                        let text = '';
+                        try { text = String((doc.body && (doc.body.innerText || doc.body.textContent)) || ''); } catch (e) { text = ''; }
+                        if (/(正在)?直播|直播回放|等待直播|直播中|直播未开始/.test(text)) liveText = true;
+                        let frames = [];
+                        try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                        for (const f of frames) {
+                            let src = '';
+                            let child = null;
+                            try { src = String(f.getAttribute('src') || ''); child = f.contentDocument; } catch (e) { child = null; }
+                            if (/live/i.test(src)) { liveText = true; continue; }
+                            if (child) scan(child, depth + 1);
+                        }
+                    };
+                    scan(document, 0);
+                    return liveText && !hasVideo;
+                } catch (e) {
+                    return false;
+                }
+            },
+            _stopForLiveNode() {
+                this._clearCheckInterval();
+                this._isPlaying = false;
+                console.warn('%c检测到直播任务点（脚本不自动处理直播）：已停止自动推进，避免把直播当成未知节点跳过。', 'color:#FF9800');
+                console.log('处理方法：1) 直播进行中：请等待直播结束并在页面上确认完成；2) 若是直播回放：可手动播放，或平台已自动标记完成后执行 app.nextUnit()。');
+                this._releaseNavLock('直播节点安全停止');
             },
             _isEmptyContentVideoNode() {
                 // F21（V3.6 补丁，真机演练：第 16 章「16.1.2 视频」空节点）：
@@ -2518,6 +2564,19 @@
                 if (reason) console.log('%c[LLM] 已中止在途请求（' + reason + '）', 'color:#607D8B');
             },
             _llmRequest(payload, onDone, onFail) {
+                // F33（V3.6 补丁）：请求节流 —— 最小间隔 + 抖动（0.7~1.3 倍），既防 429 也降低风控概率。
+                const minGap = Math.max(0, Number(this.configs.llmMinIntervalMs) || 0);
+                const nowTs = Date.now();
+                const wait = this._llmNextAllowedTs ? Math.max(0, this._llmNextAllowedTs - nowTs) : 0;
+                this._llmNextAllowedTs = nowTs + wait + Math.round(minGap * (0.7 + Math.random() * 0.6));
+                if (wait > 0) {
+                    console.log('%c[LLM] 请求节流：等待 ' + wait + 'ms 后发送（llmMinIntervalMs=' + minGap + '）', 'color:#607D8B');
+                    this._schedule(() => this._llmRequestNow(payload, onDone, onFail), wait);
+                    return null;
+                }
+                return this._llmRequestNow(payload, onDone, onFail);
+            },
+            _llmRequestNow(payload, onDone, onFail) {
                 const cfg = this.configs;
                 const timeoutMs = Math.max(1000, Number(cfg.llmTimeoutMs) || 30000);
                 let timer = null;
@@ -2629,6 +2688,26 @@
                 if (bracketed && bracketed[1]) return bracketed[1];
                 return '';
             },
+            _answerCacheKey(text) {
+                return String(text || '').replace(/\s+/g, '').replace(/[（(][^（()）]{0,30}[)）]/g, '').slice(0, 240);
+            },
+            _answerCacheGet(text) {
+                const key = this._answerCacheKey(text);
+                if (!key) return null;
+                if (!this._answerCache) this._answerCache = new Map();
+                return this._answerCache.get(key) || null;
+            },
+            _answerCacheSet(text, kind, answer) {
+                const key = this._answerCacheKey(text);
+                const ans = String(answer == null ? '' : answer).trim();
+                if (!key || !ans) return;
+                if (!this._answerCache) this._answerCache = new Map();
+                this._answerCache.set(key, { kind: kind, answer: ans, at: Date.now() });
+                if (this._answerCache.size > 500) {
+                    const firstKey = this._answerCache.keys().next().value;
+                    this._answerCache.delete(firstKey);
+                }
+            },
             _llmBuildPayload(messages) {
                 const payload = {
                     model: this.configs.llmModel,
@@ -2710,6 +2789,33 @@
                     });
                     if (hits.length) return [hits[0]];
                 }
+                // 5) F33：相似度兜底（Dice 系数 ≥ 0.8，对齐上游 best_option_by_similarity(0.8)）。
+                const dice = (a, b) => {
+                    if (!a || !b) return 0;
+                    if (a === b) return 1;
+                    const bigrams = (s) => {
+                        const m = new Map();
+                        for (let k = 0; k < s.length - 1; k++) {
+                            const g = s.slice(k, k + 2);
+                            m.set(g, (m.get(g) || 0) + 1);
+                        }
+                        return m;
+                    };
+                    const A = bigrams(a);
+                    const B2 = bigrams(b);
+                    let inter = 0;
+                    let total = 0;
+                    A.forEach((n, g) => { total += n; if (B2.has(g)) inter += Math.min(n, B2.get(g)); });
+                    B2.forEach((n) => { total += n; });
+                    return total ? (2 * inter) / total : 0;
+                };
+                let best = null;
+                let bestScore = 0;
+                for (const opt of list) {
+                    const score = dice(normalized, normText(opt.text));
+                    if (score > bestScore) { bestScore = score; best = opt; }
+                }
+                if (best && bestScore >= 0.8) return [best];
                 return [];
             },
             _llmPickOption(options, answer) {
@@ -3394,6 +3500,15 @@
                                 }
                             }
                             if (q.isShortAnswer) {
+                                const cachedShort = this._answerCacheGet(questionText);
+                                if (cachedShort && cachedShort.kind === 'short') {
+                                    const okCached = this._fillWorkAnswer(quiz.win, q, cachedShort.answer);
+                                    if (okCached) {
+                                        console.log('%c[缓存] 第 ' + (qi + 1) + ' 题命中答案缓存（写作/简答），已填入编辑器', 'color:#10B981');
+                                        askNext(qi + 1);
+                                        return;
+                                    }
+                                }
                                 console.log('%c[LLM] 第 ' + (qi + 1) + ' 题（写作/简答）作答中：' + String(questionText).slice(0, 50), 'color:#2196F3');
                                 this._llmRequest(
                                     this._llmBuildPayload(this._llmBuildShortMessages(questionText)),
@@ -3406,6 +3521,7 @@
                                             giveUp('AI 未给出有效答案，已上锁拒绝提交');
                                             return;
                                         }
+                                        this._answerCacheSet(questionText, 'short', text);
                                         const ok = this._fillWorkAnswer(quiz.win, q, text);
                                         console.log('%c[LLM] 第 ' + (qi + 1) + ' 题答案' + (ok ? '已填入编辑器' : '填充失败') + '：' + String(text).slice(0, 60), ok ? 'color:#9C27B0' : 'color:#FF9800');
                                         if (!ok) { this._lockWork('第 ' + (qi + 1) + ' 题答案填充失败'); giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
@@ -3416,10 +3532,22 @@
                                 return;
                             }
                             const options = q.optionEls.map((o, i) => ({ el: o.el, text: decoded[i + 1] || o.text, letter: String.fromCharCode(65 + i) }));
+                            // F33：LLM → 缓存 → 人工 的降级链（对齐上游 TikuFallback）；命中缓存则不耗 token、不占节流配额。
+                            const cachedChoice = this._answerCacheGet(questionText);
+                            if (cachedChoice && cachedChoice.kind === 'choice') {
+                                const cachedList = this._llmPickOptions(options, cachedChoice.answer);
+                                if (cachedList.length) {
+                                    cachedList.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
+                                    console.log('%c[缓存] 第 ' + (qi + 1) + ' 题命中答案缓存，已选择：' + cachedList.map((c) => String(c.text || '').slice(0, 20)).join(' / '), 'color:#10B981');
+                                    askNext(qi + 1);
+                                    return;
+                                }
+                            }
                             this._llmRequest(
                                 this._llmBuildPayload(this._llmBuildMessages(questionText, options)),
                                 (content) => {
                                     const answer = this._llmExtractAnswer(content);
+                                    this._answerCacheSet(questionText, 'choice', answer);
                                     const chosenList = this._llmPickOptions(options, answer);
                                     if (!chosenList.length) {
                                         // F32：失败时打印足够诊断信息（答案原文/LLM 原始输出/选项快照），便于人工定位。

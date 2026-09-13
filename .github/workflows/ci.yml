@@ -1,0 +1,22 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 安装测试依赖（jsdom + jquery）
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm install --no-save jsdom@24 jquery@3.7.1
+      - name: 双入口同步校验
+        run: node tests/verify-v3.mjs
+      - name: 回归测试
+        run: node tests/regression.mjs
+      - name: 对抗测试
+        run: node tests/adversarial.mjs
