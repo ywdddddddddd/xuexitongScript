@@ -2583,6 +2583,23 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 });
                 try { transport(String(url), done); } catch (e) { done(e); }
             },
+            _beaconGet(url, cb) {
+                // F36b：setlog 在 fystat-ans.chaoxing.com（跨域），fetch/XHR 会被 CORS 拦截；
+                // 用隐藏 iframe 导航发起 GET（携带 cookie、不受 CORS 限制），3 秒后回收 iframe。
+                const done = typeof cb === 'function' ? cb : function () {};
+                try {
+                    const f = document.createElement('iframe');
+                    f.style.cssText = 'display:none;width:0;height:0;border:0;';
+                    f.src = String(url);
+                    document.body.appendChild(f);
+                    this._schedule(() => {
+                        try { if (f.parentNode) f.parentNode.removeChild(f); } catch (e) { /* ignore */ }
+                        done(null);
+                    }, 3000);
+                } catch (e) {
+                    done(e);
+                }
+            },
             _increaseChapterStudyCount() {
                 // F36：上游流程 —— studentstudyAjax → 提取 <script src="https://fystat-ans.chaoxing.com/log/setlog..."> → GET 之。
                 if (this._chapterStudyBusy) return;
@@ -2613,7 +2630,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         const re = /<script[^>]+src=\u0022(https:\/\/fystat-ans\.chaoxing\.com\/log\/setlog[^\u0022]+)\u0022/;
                         const m = re.exec(String(text || ''));
                         if (!m) { this._chapterStudyBusy = false; console.warn('%c[章节次数] 响应中未找到 setlog URL', 'color:#FF9800'); return; }
-                        this._httpGet(m[1], (err2) => {
+                        this._beaconGet(m[1], (err2) => {
                             if (err2) { this._chapterStudyBusy = false; console.warn('%c[章节次数] setlog 失败：' + (err2 && err2.message ? err2.message : err2), 'color:#FF9800'); return; }
                             sent++;
                             console.log('%c[章节次数] setlog ' + sent + '/' + target, 'color:#4CAF50');

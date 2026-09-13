@@ -1101,18 +1101,16 @@ test('F36-1 章节学习次数：按上游流程请求 ajax 并触发 setlog', a
     app.configs.chapterStudyCount = 2;
     app.configs.chapterStudyDelayMs = 500;
     const calls = [];
+    let setlogBeacons = 0;
     app.setHttpTransport((url, cb) => {
         calls.push(url);
-        if (url.indexOf('studentstudyAjax') >= 0) {
-            cb(null, '<html><script src="https://fystat-ans.chaoxing.com/log/setlog?xxx=1"></script></html>');
-        } else {
-            cb(null, 'OK');
-        }
+        cb(null, '<html><script src="https://fystat-ans.chaoxing.com/log/setlog?xxx=1"></script></html>');
     });
+    app._beaconGet = (url, cb) => { setlogBeacons++; calls.push(url); cb(null); };
     app._increaseChapterStudyCount();
     await env.advance(4000);
     const ajaxCalls = calls.filter((u) => u.indexOf('studentstudyAjax') >= 0).length;
-    const setlogCalls = calls.filter((u) => u.indexOf('fystat-ans.chaoxing.com/log/setlog') >= 0).length;
+    const setlogCalls = setlogBeacons;
     check('F36-1 请求 studentstudyAjax 两次', ajaxCalls === 2, 'ajax=' + ajaxCalls + ' calls=' + JSON.stringify(calls.slice(0, 4)));
     check('F36-1 触发 setlog 两次', setlogCalls === 2, 'setlog=' + setlogCalls);
     check('F36-1 打印完成日志', env.xt.has('[章节次数] 已发送 2 次 setlog'), '');
