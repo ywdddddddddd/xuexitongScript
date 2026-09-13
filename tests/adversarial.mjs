@@ -410,18 +410,19 @@ console.log(`           jsdom=${require(resolve(repoRoot, 'node_modules/jsdom/pa
 
 group('A. 静态与同步（同步/语法/负向扫描/文档）');
 
-await test('A1 油猴 payload 与唯一源码逐字节一致（无 BOM 差异）', ({ note }) => {
+await test('A1 油猴 payload 与唯一源码逐字节一致（含 F34 字体表；无 BOM 差异）', ({ note }) => {
   const us = readFileSync(userScriptPath, 'utf8');
   const srcNow = readFileSync(sourcePath, 'utf8');
+  const fontData = readFileSync(resolve(repoRoot, 'resource/font-map-data.js'), 'utf8').replace(/^\uFEFF/, '');
   assert(!srcNow.startsWith('\uFEFF'), 'v3_optimized.js 以 BOM 开头');
   const marker = '// ==/UserScript==' + '\n\n';
   const idx = us.indexOf(marker);
   assert(idx >= 0, '油猴元数据块缺失或格式错误');
   const payload = us.slice(idx + marker.length);
-  assert(payload === srcNow, `payload(${payload.length}B) 与磁盘上的源码(${srcNow.length}B) 不一致：油猴版未按唯一源码重新生成`);
-  assert(payload === SOURCE, '源码在本次运行期间被修改（验证目标非冻结）');
+  assert(payload === fontData + '\n' + srcNow, `payload(${payload.length}B) 与 fontData+源码(${fontData.length + 1 + srcNow.length}B) 不一致：油猴版未按唯一源码重新生成`);
+  assert(payload === fontData + '\n' + SOURCE, '源码在本次运行期间被修改（验证目标非冻结）');
   assert(!us.startsWith('\uFEFF'), 'v3_optimized.user.js 以 BOM 开头');
-  note(`payload=${payload.length}B 与源码逐字节相同；@version=${(us.match(/@version\s+(\S+)/) || [])[1]}；源码 sha256=${sha256(srcNow).slice(0, 16)}`);
+  note(`payload=${payload.length}B = 字体表 ${fontData.length}B + 源码 ${srcNow.length}B；@version=${(us.match(/@version\s+(\S+)/) || [])[1]}；源码 sha256=${sha256(srcNow).slice(0, 16)}`);
 });
 
 await test('A2 两个入口 node --check 均通过', ({ note }) => {

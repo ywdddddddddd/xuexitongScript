@@ -16,6 +16,9 @@
  *   F24 同节点多视频并发（错开启动 + 副车道保活重播，实验特性）
  *   F32 内嵌作业选项匹配增强（字母/夹带字母/多选/标点文本）与失败诊断
  *   F33 直播节点识别 / LLM 节流 / 答案缓存 / 相似度兜底 / 默认项调整
+ *   F34 font-cxsecret glyf 哈希解密（移植上游 Samueli924/chaoxing，真实字体 + 真实表）
+ *   F35 选项匹配改为上游降级链（normalize_text/clean_res/is_subsequence/SequenceMatcher.ratio）
+ *   F36 章节学习次数（移植上游 _extract_and_send_setlog：studentstudyAjax → setlog）
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1052,6 +1055,66 @@ test('F33-4 LLM 节流：连续请求按 llmMinIntervalMs 排队 + 默认项检�
     check('F33-4 首次立即发送', sends === 1, 'sends=' + sends);
     await env.advance(1500);
     check('F33-4 第二次被节流延后发送', sends >= 2, 'sends=' + sends);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F34 font-cxsecret glyf 哈希解密（移植上游 Samueli924/chaoxing；真实字体夹具 + 真实表子集）
+// ---------------------------------------------------------------------------
+
+test('F34-1 glyf 哈希解密：真实作业字体解码结果与上游一致', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const fontB64 = readFileSync(resolve(repoRoot, 'tests/fixtures/font-cxsecret/font.b64'), 'utf8').trim();
+    const mapB64 = readFileSync(resolve(repoRoot, 'tests/fixtures/font-cxsecret/font-map.mini.b64'), 'utf8').trim();
+    env.window.__XT_FONT_MAP_B64 = mapB64;
+    const encrypted = '砲抰材抲是现抳口抮抰植体最常用抪材抲';
+    const res = await app._cxFontDecodeChars(fontB64, Array.from(encrypted));
+    const decoded = Array.from(encrypted).map((ch) => (res && res.map[ch]) || ch).join('');
+    check('F34-1 解析真实字体（numGlyphs>0）', !!res && res.font && res.font.numGlyphs > 0, res ? 'numGlyphs=' + res.font.numGlyphs : 'null');
+    check('F34-1 哈希命中 ≥ 6', !!res && res.hit >= 6, 'hit=' + (res ? res.hit : 'null'));
+    check('F34-1 解码文本与上游一致', decoded === '哪种材料是现代口腔种植体最常用的材料', decoded);
+    app.destroy();
+});
+
+test('F34-2 未提供哈希表时回退（不误判、不抛异常）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    check('F34-2 无表时 _cxFontHashMap() 返回 null', app._cxFontHashMap() === null, '');
+    const res = await app._cxFontDecodeChars('AAEAAA', ['哪']);
+    check('F34-2 无表时解码返回 null（走位图回退）', res === null, String(res));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F36 章节学习次数（移植上游 api/base.py：studentstudyAjax → 提取 setlog → GET）
+// ---------------------------------------------------------------------------
+
+test('F36-1 章节学习次数：按上游流程请求 ajax 并触发 setlog', async () => {
+    const env = createEnv({
+        html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>',
+        url: 'https://mooc1.chaoxing.com/mycourse/studentstudy?courseId=111&clazzid=222&chapterId=333&cpi=444',
+    });
+    const app = await env.boot();
+    check('F36-1 默认 chapterStudyCount=0（关闭）', app.configs.chapterStudyCount === 0, String(app.configs.chapterStudyCount));
+    app.configs.chapterStudyCount = 2;
+    app.configs.chapterStudyDelayMs = 500;
+    const calls = [];
+    app.setHttpTransport((url, cb) => {
+        calls.push(url);
+        if (url.indexOf('studentstudyAjax') >= 0) {
+            cb(null, '<html><script src="https://fystat-ans.chaoxing.com/log/setlog?xxx=1"></script></html>');
+        } else {
+            cb(null, 'OK');
+        }
+    });
+    app._increaseChapterStudyCount();
+    await env.advance(4000);
+    const ajaxCalls = calls.filter((u) => u.indexOf('studentstudyAjax') >= 0).length;
+    const setlogCalls = calls.filter((u) => u.indexOf('fystat-ans.chaoxing.com/log/setlog') >= 0).length;
+    check('F36-1 请求 studentstudyAjax 两次', ajaxCalls === 2, 'ajax=' + ajaxCalls + ' calls=' + JSON.stringify(calls.slice(0, 4)));
+    check('F36-1 触发 setlog 两次', setlogCalls === 2, 'setlog=' + setlogCalls);
+    check('F36-1 打印完成日志', env.xt.has('[章节次数] 已发送 2 次 setlog'), '');
     app.destroy();
 });
 

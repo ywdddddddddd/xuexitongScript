@@ -32,13 +32,18 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F33 | 直播节点落入未知节点流程；LLM 无节流无缓存降级；选项匹配缺相似度兜底 | 用户优化提案 | 直播节点识别（标题/内容帧/全文无 video）→ 安全停止 + 针对性提示；`llmMinIntervalMs` 最小间隔+抖动；答案缓存（题干→答案，内存 LRU 500）实现 LLM→缓存→人工 降级链；选项相似度兜底（Dice ≥ 0.8）；`docTaskScroll`/`concurrentPlayback` 改为默认开启 |
 
+| F34 | font-cxsecret 位图匹配依赖系统 Noto Sans SC、且主线程 2 万次渲染卡顿 | 上游 Samueli924/chaoxing 移植 | 移植 glyf 坐标哈希解密：TTF/WOFF 解析 → 字形 MD5 → 查 `resource/font-map-data.js`（由上游 1.6MB 表压缩为 709KB 的 18B/条映射）；确定性、毫秒级、无系统字体依赖；表缺失时自动回退位图 |
+| F35 | 选项匹配为自研 Dice 兜底，与上游语义不一致 | 上游 api/base.py 移植 | 改为上游降级链：`clean_res` → `normalize_text`（含异体字归一）→ `is_subsequence` → `SequenceMatcher.ratio ≥ 0.8`（difflib 等价实现）|
+| F36 | 无法增加章节学习次数 | 上游 api/base.py `_extract_and_send_setlog` 移植 | `chapterStudyCount>0` 时周期性请求 `studentstudyAjax`，从响应提取 `fystat-ans.../log/setlog` 并触发；HTTP 走油猴 GM 或宿主注入 `app.setHttpTransport(fn)` |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
 - [v3_optimized.user.js](v3_optimized.user.js) —— Tampermonkey 油猴版（构建产物）
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
+- [resource/font_map_table.json](resource/font_map_table.json)（上游 Samueli924/chaoxing，MIT）与 [resource/font-map-data.js](resource/font-map-data.js)（自动生成的紧凑表，供 F34 使用）
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F33，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F36，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
@@ -126,7 +131,9 @@ llmWorkWaitMs: 90000
 - `concurrentLanes`（默认 2）：并发路数上限（2~4）。
 - `laneKeeperIntervalMs` / `laneMaxReplaysPerUnit`（默认 3000ms / 240 次）：副车道保活检查间隔与每小节重播上限。
 - `pauseGuard`（默认 **true**，V3.6 新增）：拦截平台「鼠标移出页面自动暂停」的防挂机暂停。只拦截「最近 1.5 秒无点击/按键」的暂停调用；用户主动点击暂停仍正常生效。如遇异常可设为 `false` 关闭。
-- `cxSecretDecode`（默认 **true**，V3.6 新增）：自动解密平台的 font-cxsecret 反copy字体（用系统 Noto Sans SC/思源黑体同字形做位图匹配），解密题干与选项后再交给 LLM 作答/匹配；无字体或无 Canvas 环境自动跳过。
+- `cxSecretDecode`（默认 **true**，V3.6 新增）：自动解密平台的 font-cxsecret 反copy字体。V3.6 补丁（F34）起优先走**上游 glyf 坐标哈希**（`cxSecretFontMode: auto`，数据表 709KB 随构建/演练注入），确定性且无系统字体依赖；表缺失时自动回退位图匹配。
+- `cxSecretFontMode`（默认 **auto**）：`auto`=哈希优先、失败回退位图；`hash`=只用哈希；`bitmap`=只用位图。
+- `chapterStudyCount`（默认 **0**，V3.6 补丁 F36）：>0 时按上游流程增加章节学习次数（`studentstudyAjax` → setlog）；`chapterStudyDelayMs` 控制间隔（默认 2500ms）。需要 HTTP 传输：油猴版走 GM_xmlhttpRequest，控制台/演练由宿主注入 `app.setHttpTransport(fn)`。
 - `workSanityLock`（默认 **true**，V3.6 新增）：题目合格性预检 + 提交锁。给 AI 发请求前先校验题目（排除界面文案/过短/选项不足等异常），异常或未全部作答时**上锁拒绝提交**，交人工处理（修复真机演练中「编辑器外壳被当选项 → 提交空值」事故）。
 - `docTaskScroll`（默认 **true**，V3.6 补丁 F33 起默认开启；V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅：自动把文档滚动到底部并等待平台标记完成。如需关闭（例如担心翻页节奏），设 `docTaskScroll = false`，此时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）。
 ## 使用方法

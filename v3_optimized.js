@@ -129,6 +129,14 @@
                 pauseGuard: true,
                 // F17（V3.6）：font-cxsecret 反copy字体自动解密（用系统 Noto Sans SC 做字形匹配）。
                 cxSecretDecode: true,
+                // F34（V3.6 补丁）：font-cxsecret 解密模式。auto=优先 glyf 哈希（移植上游 Samueli924/chaoxing），
+                // 数据表缺失/解析失败时自动回退位图匹配；bitmap=只用位图；hash=只用哈希。
+                cxSecretFontMode: 'auto',
+                // F36（V3.6 补丁）：章节学习次数（移植上游 api/base.py _extract_and_send_setlog）。
+                // >0 时周期性请求 studentstudyAjax，从响应中提取 fystat setlog 并触发；需要 HTTP 传输
+                // （油猴 GM_xmlhttpRequest，或宿主注入 app.setHttpTransport(fn)）。
+                chapterStudyCount: 0,
+                chapterStudyDelayMs: 2500,
                 // F19（V3.6）：题目合格性预检 + 提交锁。校验不通过（题目疑似界面文案/过短/选项不足/作答异常）
                 // 一律不提交并上锁，交人工处理（真机教训：编辑器外壳被当选项 → 提交了 8 次空值）。
                 workSanityLock: true,
@@ -283,6 +291,7 @@
                 this._laneLoadTried = null;
                 this._laneLastKeeperTs = 0;
                 this._startLaneKeeper();
+                this._increaseChapterStudyCount();
                 this._guiInit();
                 this.play();
             },
@@ -2523,6 +2532,72 @@
                 this._guiRefreshStatus(true);
                 return this._llmApiKey.length > 0;
             },
+            setHttpTransport(fn) {
+                // F36：可插拔 HTTP 传输（与 setLlmTransport 同思路）——油猴版走 GM_xmlhttpRequest；
+                // 控制台/演练环境由宿主注入（演练通过 CDP 注入同源 fetch 实现）。
+                this._httpTransport = typeof fn === 'function' ? fn : null;
+                console.log('%c[HTTP] ' + (this._httpTransport ? '已设置' : '已清除') + '自定义传输实现', 'color:#2196F3');
+                return !!this._httpTransport;
+            },
+            _httpGet(url, cb) {
+                const done = typeof cb === 'function' ? cb : function () {};
+                const transport = this._httpTransport || ((u, c) => {
+                    let gm = null;
+                    try {
+                        if (typeof GM_xmlhttpRequest !== 'undefined' && GM_xmlhttpRequest) gm = GM_xmlhttpRequest;
+                        else if (window && window.GM_xmlhttpRequest) gm = window.GM_xmlhttpRequest;
+                    } catch (e) { gm = null; }
+                    if (typeof gm !== 'function') { c(new Error('当前环境没有 HTTP 传输（油猴 GM_xmlhttpRequest 或 app.setHttpTransport）')); return null; }
+                    return gm({
+                        method: 'GET',
+                        url: u,
+                        onload: (res) => c(null, res && res.responseText),
+                        onerror: (err) => c(err || new Error('HTTP 错误')),
+                        ontimeout: () => c(new Error('HTTP 超时')),
+                    });
+                });
+                try { transport(String(url), done); } catch (e) { done(e); }
+            },
+            _increaseChapterStudyCount() {
+                // F36：上游流程 —— studentstudyAjax → 提取 <script src="https://fystat-ans.chaoxing.com/log/setlog..."> → GET 之。
+                if (this._chapterStudyBusy) return;
+                const target = Math.max(0, Number(this.configs.chapterStudyCount) || 0);
+                if (!target) return;
+                this._chapterStudyBusy = true;
+                let sent = 0;
+                const delay = Math.max(500, Number(this.configs.chapterStudyDelayMs) || 2500);
+                const step = () => {
+                    if (sent >= target) {
+                        this._chapterStudyBusy = false;
+                        console.log('%c[章节次数] 已发送 ' + sent + ' 次 setlog，完成', 'color:#4CAF50');
+                        return;
+                    }
+                    let ajaxUrl = '';
+                    try {
+                        const q = new URLSearchParams(location.search);
+                        const pick = (k) => q.get(k) || '';
+                        ajaxUrl = '/mooc-ans/mycourse/studentstudyAjax?courseId=' + pick('courseId')
+                            + '&clazzid=' + pick('clazzid')
+                            + '&chapterId=' + pick('chapterId')
+                            + '&cpi=' + pick('cpi')
+                            + '&verificationcode=&mooc2=1';
+                    } catch (e) { ajaxUrl = ''; }
+                    if (!ajaxUrl) { this._chapterStudyBusy = false; return; }
+                    this._httpGet(ajaxUrl, (err, text) => {
+                        if (err) { this._chapterStudyBusy = false; console.warn('%c[章节次数] 请求失败：' + (err && err.message ? err.message : err), 'color:#FF9800'); return; }
+                        const re = /<script[^>]+src=\u0022(https:\/\/fystat-ans\.chaoxing\.com\/log\/setlog[^\u0022]+)\u0022/;
+                        const m = re.exec(String(text || ''));
+                        if (!m) { this._chapterStudyBusy = false; console.warn('%c[章节次数] 响应中未找到 setlog URL', 'color:#FF9800'); return; }
+                        this._httpGet(m[1], (err2) => {
+                            if (err2) { this._chapterStudyBusy = false; console.warn('%c[章节次数] setlog 失败：' + (err2 && err2.message ? err2.message : err2), 'color:#FF9800'); return; }
+                            sent++;
+                            console.log('%c[章节次数] setlog ' + sent + '/' + target, 'color:#4CAF50');
+                            this._schedule(step, delay);
+                        });
+                    });
+                };
+                step();
+            },
             setLlmTransport(fn) {
                 this._llmTransport = typeof fn === 'function' ? fn : null;
                 console.log('%c[LLM] ' + (this._llmTransport ? '已设置' : '已清除') + '自定义传输实现', 'color:#2196F3');
@@ -2724,10 +2799,76 @@
                     { role: 'user', content: user },
                 ];
             },
+            _cxNormalizeText(text) {
+                // F35：移植上游 api/base.py normalize_text —— 异体字归一 + 去字母前缀/空白/标点 + 小写。
+                let t = String(text == null ? '' : text);
+                t = t.replace(/⻛/g, '风').replace(/⻔/g, '门').replace(/⻋/g, '车').replace(/⻢/g, '马');
+                t = t.replace(/^[A-Za-z]\s*[.、:：)?）]?\s*/, '');
+                t = t.replace(/\s+/g, '');
+                t = t.replace(/[，。！？；：,.!?;:()（）\[\]【】\u0022\u201C\u201D\u2018\u2019\-_/\\|]/g, '');
+                return t.toLowerCase();
+            },
+            _cxCleanAnswer(value) {
+                // F35：移植上游 clean_res —— 去选项字母前缀与首尾标点（长度>1 时才去字母前缀）。
+                const s = String(value == null ? '' : value).trim();
+                if (s.length <= 1) return s;
+                return s.replace(/^[A-Za-z]\s*[.、:：)?）]?\s*/, '').replace(/[.,!?;:，。！？；：]/g, '').trim();
+            },
+            _cxIsSubsequence(a, o) {
+                // F35：移植上游 is_subsequence（a 的字符是否按序出现在 o 中）。
+                const aa = String(a == null ? '' : a).toLowerCase();
+                const oo = String(o == null ? '' : o).toLowerCase();
+                if (!aa) return false;
+                let i = 0;
+                for (const ch of oo) { if (ch === aa[i]) i++; if (i >= aa.length) return true; }
+                return false;
+            },
+            _cxSeqRatio(a, b) {
+                // F35：移植 difflib.SequenceMatcher.ratio 的等价实现（Ratcliff-Obershelp；无 junk 启发式）。
+                const A = String(a || '');
+                const B = String(b || '');
+                if (!A.length && !B.length) return 1;
+                if (!A.length || !B.length) return 0;
+                const longestMatch = (alo, ahi, blo, bhi) => {
+                    let besti = alo, bestj = blo, bestsize = 0;
+                    const b2j = new Map();
+                    for (let j = blo; j < bhi; j++) {
+                        const ch = B[j];
+                        if (!b2j.has(ch)) b2j.set(ch, []);
+                        b2j.get(ch).push(j);
+                    }
+                    let j2len = new Map();
+                    for (let i = alo; i < ahi; i++) {
+                        const newj2len = new Map();
+                        const js = b2j.get(A[i]) || [];
+                        for (const j of js) {
+                            if (j < blo) continue;
+                            if (j >= bhi) break;
+                            const k = (j2len.get(j - 1) || 0) + 1;
+                            newj2len.set(j, k);
+                            if (k > bestsize) { besti = i - k + 1; bestj = j - k + 1; bestsize = k; }
+                        }
+                        j2len = newj2len;
+                    }
+                    return { i: besti, j: bestj, size: bestsize };
+                };
+                let total = 0;
+                const stack = [[0, A.length, 0, B.length]];
+                while (stack.length) {
+                    const cur = stack.pop();
+                    const m = longestMatch(cur[0], cur[1], cur[2], cur[3]);
+                    if (m.size > 0) {
+                        total += m.size;
+                        if (cur[0] < m.i && cur[2] < m.j) stack.push([cur[0], m.i, cur[2], m.j]);
+                        if (m.i + m.size < cur[1] && m.j + m.size < cur[3]) stack.push([m.i + m.size, cur[1], m.j + m.size, cur[3]]);
+                    }
+                }
+                return (2 * total) / (A.length + B.length);
+            },
             _llmPickOptions(options, answer) {
-                // F32（V3.6 补丁）：选项匹配增强 —— 真机复现「第 9 题无法匹配选项」时会直接放弃整份作业。
-                // 支持：纯字母/多选字母（B、C）、答案夹带字母（选B / B选项 / B（钛及钛合金））、
-                // 判断题、以及去标点括号后的包含匹配。
+                // F35（V3.6 补丁）：选项匹配改为移植上游 api/base.py 的降级链：
+                //   clean_res(去字母前缀) → is_subsequence → normalize_text + SequenceMatcher.ratio(0.8)；
+                //   纯字母/多选字母/判断题的直接命中保留（这是页面的基本形态）。
                 const list = Array.isArray(options) ? options : [];
                 const ans = String(answer == null ? '' : answer).trim();
                 if (!list.length || !ans) return [];
@@ -2738,9 +2879,7 @@
                     const picked = [];
                     for (const ch of compact) {
                         if (ch < 'A' || ch > 'H') continue;
-                        for (const opt of byLetter(ch)) {
-                            if (picked.indexOf(opt) < 0) picked.push(opt);
-                        }
+                        for (const opt of byLetter(ch)) if (picked.indexOf(opt) < 0) picked.push(opt);
                     }
                     if (picked.length) return picked;
                 }
@@ -2761,44 +2900,25 @@
                     });
                     if (hit.length) return hit.slice(0, 1);
                 }
-                // 4) 去标点/括号/空白后的包含匹配
-                const normText = (s) => String(s == null ? '' : s)
-                    .replace(/^[A-Ha-h][、.．:：\s]*/, '')
-                    .replace(/[\s（）()【】\[\]「」『』\u201C\u201D\u2018\u2019\u0022\u0027\u0060·、,，.。;；:：!！?？\-—_]/g, '')
-                    .toUpperCase();
-                const normalized = normText(ans);
+                // 4) 上游链：clean_res → normalize_text 包含匹配 → is_subsequence
+                const cleaned = this._cxCleanAnswer(ans);
+                const normalized = this._cxNormalizeText(cleaned);
                 if (normalized) {
-                    const hits = list.filter((opt) => {
-                        const t = normText(opt.text);
-                        if (!t) return false;
-                        return t === normalized || t.indexOf(normalized) >= 0 || normalized.indexOf(t) >= 0;
-                    });
-                    if (hits.length) return [hits[0]];
+                    for (const opt of list) {
+                        const optionText = String(opt.text || '');
+                        const optNorm = this._cxNormalizeText(this._cxCleanAnswer(optionText));
+                        if (!optNorm) continue;
+                        if (optNorm === normalized || optNorm.indexOf(normalized) >= 0 || normalized.indexOf(optNorm) >= 0) return [opt];
+                        if (this._cxIsSubsequence(normalized, optNorm)) return [opt];
+                    }
                 }
-                // 5) F33：相似度兜底（Dice 系数 ≥ 0.8，对齐上游 best_option_by_similarity(0.8)）。
-                const dice = (a, b) => {
-                    if (!a || !b) return 0;
-                    if (a === b) return 1;
-                    const bigrams = (s) => {
-                        const m = new Map();
-                        for (let k = 0; k < s.length - 1; k++) {
-                            const g = s.slice(k, k + 2);
-                            m.set(g, (m.get(g) || 0) + 1);
-                        }
-                        return m;
-                    };
-                    const A = bigrams(a);
-                    const B2 = bigrams(b);
-                    let inter = 0;
-                    let total = 0;
-                    A.forEach((n, g) => { total += n; if (B2.has(g)) inter += Math.min(n, B2.get(g)); });
-                    B2.forEach((n) => { total += n; });
-                    return total ? (2 * inter) / total : 0;
-                };
+                // 5) 上游相似度兜底：SequenceMatcher.ratio ≥ 0.8
                 let best = null;
                 let bestScore = 0;
                 for (const opt of list) {
-                    const score = dice(normalized, normText(opt.text));
+                    const optNorm = this._cxNormalizeText(this._cxCleanAnswer(String(opt.text || '')));
+                    if (!optNorm) continue;
+                    const score = this._cxSeqRatio(normalized, optNorm);
                     if (score > bestScore) { bestScore = score; best = opt; }
                 }
                 if (best && bestScore >= 0.8) return [best];
@@ -3074,6 +3194,281 @@
             // 原理：平台用「思源黑体子集」做反copy字体（乱码 codepoint → 真实字形）。系统装有 Noto Sans SC
             // （与思源黑体同一套字形设计），把乱码字与全 CJK 候选用同尺寸渲染做墨迹归一化位图匹配即可还原明文。
             // 真机验证：媕媑媒媖媓媔念 → 简析版画的概念（与已知明文完全一致，字面得分 0）。
+            _md5Hex(input) {
+                // F34：紧凑 MD5（输入按 latin1 处理；字形哈希输入只含数字/负号，无编码问题）。
+                const s = String(input == null ? '' : input);
+                const bytes = [];
+                for (let i = 0; i < s.length; i++) {
+                    const c = s.charCodeAt(i);
+                    bytes.push(c & 0xff);
+                    if (c > 0xff) bytes.push((c >> 8) & 0xff);
+                }
+                const bitLen = bytes.length * 8;
+                bytes.push(0x80);
+                while (bytes.length % 64 !== 56) bytes.push(0);
+                const lenLo = bitLen >>> 0;
+                const lenHi = Math.floor(bitLen / 0x100000000) >>> 0;
+                bytes.push(lenLo & 0xff, (lenLo >>> 8) & 0xff, (lenLo >>> 16) & 0xff, (lenLo >>> 24) & 0xff);
+                bytes.push(lenHi & 0xff, (lenHi >>> 8) & 0xff, (lenHi >>> 16) & 0xff, (lenHi >>> 24) & 0xff);
+                const K = [];
+                for (let i = 0; i < 64; i++) K.push(Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0);
+                const S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+                    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+                    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+                    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+                const rotl = (x, c) => ((x << c) | (x >>> (32 - c))) >>> 0;
+                let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+                for (let off = 0; off < bytes.length; off += 64) {
+                    const M = new Array(16);
+                    for (let i = 0; i < 16; i++) {
+                        M[i] = (bytes[off + i * 4] | (bytes[off + i * 4 + 1] << 8) | (bytes[off + i * 4 + 2] << 16) | (bytes[off + i * 4 + 3] << 24)) >>> 0;
+                    }
+                    let A = a0, B = b0, C = c0, D = d0;
+                    for (let i = 0; i < 64; i++) {
+                        let F, g;
+                        if (i < 16) { F = (B & C) | (~B & D); g = i; }
+                        else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+                        else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; }
+                        else { F = C ^ (B | ~D); g = (7 * i) % 16; }
+                        F = (F + A + K[i] + M[g]) >>> 0;
+                        A = D; D = C; C = B;
+                        B = (B + rotl(F, S[i])) >>> 0;
+                    }
+                    a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
+                }
+                const hex = (n) => {
+                    let out = '';
+                    for (let i = 0; i < 4; i++) out += ('0' + ((n >>> (i * 8)) & 0xff).toString(16)).slice(-2);
+                    return out;
+                };
+                return hex(a0) + hex(b0) + hex(c0) + hex(d0);
+            },
+            _cxB64ToBytes(b64) {
+                try {
+                    const bin = atob(String(b64 || ''));
+                    const bytes = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
+                    return bytes;
+                } catch (e) {
+                    return null;
+                }
+            },
+            _cxFontHashMap() {
+                // F34：window.__XT_FONT_MAP_B64 = 每条 18 字节（16B MD5 + 2B 字符码，大端）的 base64。
+                if (this._cxFontHashTable) return this._cxFontHashTable;
+                let b64 = '';
+                try { b64 = (typeof window !== 'undefined' && window.__XT_FONT_MAP_B64) || ''; } catch (e) { b64 = ''; }
+                if (!b64) return null;
+                try {
+                    const bin = atob(b64);
+                    const map = new Map();
+                    for (let i = 0; i + 17 < bin.length; i += 18) {
+                        let hash = '';
+                        for (let j = 0; j < 16; j++) hash += ('0' + bin.charCodeAt(i + j).toString(16)).slice(-2);
+                        const code = (bin.charCodeAt(i + 16) << 8) | bin.charCodeAt(i + 17);
+                        if (code) map.set(hash, String.fromCharCode(code));
+                    }
+                    this._cxFontHashTable = map;
+                    return map;
+                } catch (e) {
+                    return null;
+                }
+            },
+            async _cxInflate(bytes) {
+                try {
+                    const ds = new DecompressionStream('deflate');
+                    const stream = new Blob([bytes]).stream().pipeThrough(ds);
+                    const ab = await new Response(stream).arrayBuffer();
+                    return new Uint8Array(ab);
+                } catch (e) {
+                    return null;
+                }
+            },
+            async _cxWoffToSfnt(buf) {
+                // F34：WOFF 解包（上游字体常为 WOFF；Chrome 用 DecompressionStream 解 zlib）。
+                if (typeof DecompressionStream === 'undefined') return null;
+                const u16 = (o) => (buf[o] << 8) | buf[o + 1];
+                const u32 = (o) => ((buf[o] << 24) | (buf[o + 1] << 16) | (buf[o + 2] << 8) | buf[o + 3]) >>> 0;
+                const numTables = u16(12);
+                const tables = [];
+                for (let i = 0; i < numTables; i++) {
+                    const off = 44 + i * 20;
+                    const tag = String.fromCharCode(buf[off], buf[off + 1], buf[off + 2], buf[off + 3]);
+                    const offset = u32(off + 4);
+                    const compLength = u32(off + 8);
+                    const origLength = u32(off + 12);
+                    let data;
+                    if (compLength < origLength) {
+                        data = await this._cxInflate(buf.slice(offset, offset + compLength));
+                        if (!data) return null;
+                    } else {
+                        data = buf.slice(offset, offset + compLength);
+                    }
+                    tables.push({ tag: tag, data: data });
+                }
+                const n = tables.length;
+                let searchRange = 1, entrySelector = 0;
+                while (searchRange * 2 <= n) { searchRange *= 2; entrySelector++; }
+                searchRange *= 16;
+                const headerLen = 12 + n * 16;
+                const outLen = headerLen + tables.reduce((s, t) => s + t.data.length + ((4 - (t.data.length % 4)) % 4), 0);
+                const out = new Uint8Array(outLen);
+                out[0] = 0; out[1] = 1; out[2] = 0; out[3] = 0;
+                out[4] = (n >> 8) & 0xff; out[5] = n & 0xff;
+                out[6] = (searchRange >> 8) & 0xff; out[7] = searchRange & 0xff;
+                out[8] = (entrySelector >> 8) & 0xff; out[9] = entrySelector & 0xff;
+                out[10] = (((n * 16 - searchRange) >> 8) & 0xff); out[11] = ((n * 16 - searchRange) & 0xff);
+                let dataOff = headerLen;
+                for (let i = 0; i < n; i++) {
+                    const rec = 12 + i * 16;
+                    const tag = tables[i].tag;
+                    out[rec] = tag.charCodeAt(0); out[rec + 1] = tag.charCodeAt(1); out[rec + 2] = tag.charCodeAt(2); out[rec + 3] = tag.charCodeAt(3);
+                    out[rec + 4] = 0; out[rec + 5] = 0; out[rec + 6] = 0; out[rec + 7] = 0;
+                    out[rec + 8] = (dataOff >>> 24) & 0xff; out[rec + 9] = (dataOff >>> 16) & 0xff; out[rec + 10] = (dataOff >>> 8) & 0xff; out[rec + 11] = dataOff & 0xff;
+                    const len = tables[i].data.length;
+                    out[rec + 12] = (len >>> 24) & 0xff; out[rec + 13] = (len >>> 16) & 0xff; out[rec + 14] = (len >>> 8) & 0xff; out[rec + 15] = len & 0xff;
+                    out.set(tables[i].data, dataOff);
+                    dataOff += len + ((4 - (len % 4)) % 4);
+                }
+                return out;
+            },
+            _cxParseSfnt(buf) {
+                try {
+                    const u16 = (o) => (buf[o] << 8) | buf[o + 1];
+                    const i16 = (o) => { const v = u16(o); return v >= 0x8000 ? v - 0x10000 : v; };
+                    const u32 = (o) => ((buf[o] << 24) | (buf[o + 1] << 16) | (buf[o + 2] << 8) | buf[o + 3]) >>> 0;
+                    const numTables = u16(4);
+                    const tables = {};
+                    for (let i = 0; i < numTables; i++) {
+                        const off = 12 + i * 16;
+                        const tag = String.fromCharCode(buf[off], buf[off + 1], buf[off + 2], buf[off + 3]);
+                        tables[tag] = { offset: u32(off + 8), length: u32(off + 12) };
+                    }
+                    if (!tables.head || !tables.maxp || !tables.loca || !tables.glyf || !tables.cmap) return null;
+                    const indexToLocFormat = i16(tables.head.offset + 50);
+                    const numGlyphs = u16(tables.maxp.offset + 4);
+                    const locaOffsets = [];
+                    for (let i = 0; i < numGlyphs + 1; i++) {
+                        locaOffsets.push(indexToLocFormat === 0 ? u16(tables.loca.offset + i * 2) * 2 : u32(tables.loca.offset + i * 4));
+                    }
+                    const cmap = new Map();
+                    const cm = tables.cmap.offset;
+                    const nSub = u16(cm + 2);
+                    for (let i = 0; i < nSub; i++) {
+                        const rec = cm + 4 + i * 8;
+                        const subOff = cm + u32(rec + 4);
+                        const format = u16(subOff);
+                        if (format === 4) {
+                            const segCount = u16(subOff + 6) / 2;
+                            const endBase = subOff + 14;
+                            const startBase = endBase + segCount * 2 + 2;
+                            const deltaBase = startBase + segCount * 2;
+                            const rangeBase = deltaBase + segCount * 2;
+                            for (let s = 0; s < segCount; s++) {
+                                const end = u16(endBase + s * 2), start = u16(startBase + s * 2);
+                                const delta = i16(deltaBase + s * 2), rangeOff = u16(rangeBase + s * 2);
+                                for (let c = start; c <= end && c !== 0xFFFF; c++) {
+                                    let gid;
+                                    if (rangeOff === 0) gid = (c + delta) & 0xFFFF;
+                                    else {
+                                        const gi = rangeBase + s * 2 + rangeOff + (c - start) * 2;
+                                        if (gi + 1 >= buf.length) continue;
+                                        gid = u16(gi);
+                                        if (gid) gid = (gid + delta) & 0xFFFF;
+                                    }
+                                    if (gid) cmap.set(c, gid);
+                                }
+                            }
+                        } else if (format === 12) {
+                            const nGroups = u32(subOff + 12);
+                            for (let g = 0; g < nGroups; g++) {
+                                const base = subOff + 16 + g * 12;
+                                const startChar = u32(base), endChar = u32(base + 4), startGid = u32(base + 8);
+                                for (let c = startChar; c <= endChar; c++) cmap.set(c, startGid + (c - startChar));
+                            }
+                        }
+                    }
+                    return { buf: buf, tables: tables, locaOffsets: locaOffsets, numGlyphs: numGlyphs, cmap: cmap };
+                } catch (e) {
+                    return null;
+                }
+            },
+            _cxGlyphHash(font, gid) {
+                // F34：上游 hash_glyph —— 逐点拼接 "x{y}{flag&1}" 后取 MD5；复合/空字形跳过。
+                try {
+                    const buf = font.buf;
+                    const u16 = (o) => (buf[o] << 8) | buf[o + 1];
+                    const i16 = (o) => { const v = u16(o); return v >= 0x8000 ? v - 0x10000 : v; };
+                    const start = font.locaOffsets[gid], end = font.locaOffsets[gid + 1];
+                    if (end <= start) return '';
+                    let p = font.tables.glyf.offset + start;
+                    const numberOfContours = i16(p); p += 2;
+                    if (numberOfContours <= 0) return '';
+                    p += 8;
+                    const endPts = [];
+                    for (let i = 0; i < numberOfContours; i++) { endPts.push(u16(p)); p += 2; }
+                    const instrLen = u16(p); p += 2 + instrLen;
+                    const totalPts = endPts[endPts.length - 1] + 1;
+                    const flags = [];
+                    while (flags.length < totalPts) {
+                        const f = buf[p]; p += 1;
+                        flags.push(f);
+                        if (f & 0x08) { let rep = buf[p]; p += 1; while (rep-- > 0 && flags.length < totalPts) flags.push(f); }
+                    }
+                    const xs = []; let x = 0;
+                    for (let i = 0; i < totalPts; i++) {
+                        const f = flags[i];
+                        if (f & 0x02) { const d = buf[p]; p += 1; x += (f & 0x10) ? d : -d; }
+                        else if (!(f & 0x10)) { const d = i16(p); p += 2; x += d; }
+                        xs.push(x);
+                    }
+                    const ys = []; let y = 0;
+                    for (let i = 0; i < totalPts; i++) {
+                        const f = flags[i];
+                        if (f & 0x04) { const d = buf[p]; p += 1; y += (f & 0x20) ? d : -d; }
+                        else if (!(f & 0x20)) { const d = i16(p); p += 2; y += d; }
+                        ys.push(y);
+                    }
+                    let posData = '';
+                    let last = 0;
+                    for (let c = 0; c < numberOfContours; c++) {
+                        const endPoint = endPts[c];
+                        for (let j = last; j <= endPoint; j++) posData += String(xs[j]) + String(ys[j]) + String(flags[j] & 0x01);
+                        last = endPoint + 1;
+                    }
+                    return this._md5Hex(posData);
+                } catch (e) {
+                    return '';
+                }
+            },
+            async _cxFontFromB64(b64) {
+                const bytes = this._cxB64ToBytes(b64);
+                if (!bytes || bytes.length < 12) return null;
+                let buf = bytes;
+                const sig = String.fromCharCode(buf[0], buf[1], buf[2], buf[3]);
+                if (sig === 'wOFF') {
+                    buf = await this._cxWoffToSfnt(buf);
+                    if (!buf) return null;
+                }
+                return this._cxParseSfnt(buf);
+            },
+            async _cxFontDecodeChars(b64, chars) {
+                // F34：对给定汉字逐一 glyf 哈希 → 查表得到真字；返回 { map, hit, total }。
+                const table = this._cxFontHashMap();
+                if (!table || !b64) return null;
+                const font = await this._cxFontFromB64(b64);
+                if (!font) return null;
+                const map = {};
+                let hit = 0;
+                const list = Array.isArray(chars) ? chars : Array.from(String(chars || ''));
+                for (const ch of list) {
+                    const gid = font.cmap.get(ch.charCodeAt(0));
+                    const hash = (gid != null) ? this._cxGlyphHash(font, gid) : '';
+                    const real = hash ? table.get(hash) : null;
+                    if (real && real !== ch) { map[ch] = real; hit++; }
+                }
+                return { map: map, hit: hit, total: list.length, font: font };
+            },
             _cxSecretFontB64() {
                 if (this._cxFontB64) return this._cxFontB64;
                 let found = '';
@@ -3190,6 +3585,20 @@
                         finish();
                     } catch (e) { console.warn('%c[字库解密] 失败：' + (e && e.message ? e.message : e), 'color:#FF9800'); finish(); }
                 };
+                // F34：优先 glyf 哈希解密（上游算法，确定性 + 无系统字体依赖）；未命中则回退位图。
+                if (String(this.configs.cxSecretFontMode || 'auto') !== 'bitmap' && this._cxFontHashMap()) {
+                    const self = this;
+                    this._cxFontDecodeChars(b64, chars).then((res) => {
+                        if (res && res.hit > 0) {
+                            for (const k in res.map) { if (Object.prototype.hasOwnProperty.call(res.map, k)) cached[k] = res.map[k]; }
+                            console.log('%c[字库解密] glyf 哈希命中 ' + res.hit + '/' + res.total + ' 字（上游 Samueli924/chaoxing 算法）', 'color:#4CAF50');
+                            finish();
+                        } else {
+                            run();
+                        }
+                    }).catch(() => { run(); });
+                    return;
+                }
                 if (!this._cxFontLoaded && typeof FontFace !== 'undefined' && document.fonts) {
                     try {
                         const ff = new FontFace('xt_cxsecret', 'url(data:font/ttf;base64,' + b64 + ')');
