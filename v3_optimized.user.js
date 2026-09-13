@@ -2659,33 +2659,62 @@
                     { role: 'user', content: user },
                 ];
             },
-            _llmPickOption(options, answer) {
+            _llmPickOptions(options, answer) {
+                // F32（V3.6 补丁）：选项匹配增强 —— 真机复现「第 9 题无法匹配选项」时会直接放弃整份作业。
+                // 支持：纯字母/多选字母（B、C）、答案夹带字母（选B / B选项 / B（钛及钛合金））、
+                // 判断题、以及去标点括号后的包含匹配。
                 const list = Array.isArray(options) ? options : [];
                 const ans = String(answer == null ? '' : answer).trim();
-                if (!list.length || !ans) return null;
-                const upper = ans.toUpperCase();
-                for (const opt of list) {
-                    const letter = String(opt.letter || '').toUpperCase();
-                    if (letter && letter === upper) return opt;
-                    const t = String(opt.text || '').toUpperCase();
-                    if (t.indexOf(upper + '、') === 0 || t.indexOf(upper + '.') === 0 || t.indexOf(upper + '．') === 0) return opt;
+                if (!list.length || !ans) return [];
+                const compact = ans.replace(/\s+/g, '').toUpperCase();
+                const byLetter = (ch) => list.filter((opt) => String(opt.letter || '').toUpperCase() === ch);
+                // 1) 纯字母答案（含多选：B / B、C / B和C）
+                if (/^[A-H]([、,，.．:：和及]{0,2}[A-H])*$/.test(compact)) {
+                    const picked = [];
+                    for (const ch of compact) {
+                        if (ch < 'A' || ch > 'H') continue;
+                        for (const opt of byLetter(ch)) {
+                            if (picked.indexOf(opt) < 0) picked.push(opt);
+                        }
+                    }
+                    if (picked.length) return picked;
                 }
+                // 2) 答案夹带单个字母（「选B」「B选项」「答案：B」「B（xxx）」）
+                const letters = compact.match(/[A-H]/g) || [];
+                if (letters.length === 1 && (compact.indexOf(letters[0]) === 0 || compact.replace(/[A-H]/g, '').length <= 8)) {
+                    const hit = byLetter(letters[0]);
+                    if (hit.length) return hit.slice(0, 1);
+                }
+                // 3) 判断题
                 const judge = this._llmNormalizeJudge(ans);
                 if (judge) {
-                    for (const opt of list) {
+                    const hit = list.filter((opt) => {
                         const t = String(opt.text || '');
-                        if (judge === '对' && /正确|^对$|√|true/i.test(t)) return opt;
-                        if (judge === '错' && /错误|^错$|×|false/i.test(t)) return opt;
-                    }
+                        if (judge === '对') return /正确|^对$|√|true/i.test(t);
+                        if (judge === '错') return /错误|^错$|×|false/i.test(t);
+                        return false;
+                    });
+                    if (hit.length) return hit.slice(0, 1);
                 }
-                const normalized = ans.replace(/^[A-Ha-h][、.．:：\s]*/, '').trim();
+                // 4) 去标点/括号/空白后的包含匹配
+                const normText = (s) => String(s == null ? '' : s)
+                    .replace(/^[A-Ha-h][、.．:：\s]*/, '')
+                    .replace(/[\s（）()【】\[\]「」『』\u201C\u201D\u2018\u2019\u0022\u0027\u0060·、,，.。;；:：!！?？\-—_]/g, '')
+                    .toUpperCase();
+                const normalized = normText(ans);
                 if (normalized) {
-                    for (const opt of list) {
-                        const t = String(opt.text || '').replace(/^[A-Ha-h][、.．:：\s]*/, '').trim();
-                        if (t && (t === normalized || t.indexOf(normalized) >= 0 || normalized.indexOf(t) >= 0)) return opt;
-                    }
+                    const hits = list.filter((opt) => {
+                        const t = normText(opt.text);
+                        if (!t) return false;
+                        return t === normalized || t.indexOf(normalized) >= 0 || normalized.indexOf(t) >= 0;
+                    });
+                    if (hits.length) return [hits[0]];
                 }
-                return null;
+                return [];
+            },
+            _llmPickOption(options, answer) {
+                const picked = this._llmPickOptions(options, answer);
+                return picked.length ? picked[0] : null;
             },
             _llmQuestionKey(found) {
                 const t = String((found && (found.questionText || found.text)) || '');
@@ -3391,10 +3420,17 @@
                                 this._llmBuildPayload(this._llmBuildMessages(questionText, options)),
                                 (content) => {
                                     const answer = this._llmExtractAnswer(content);
-                                    const chosen = this._llmPickOption(options, answer);
-                                    if (!chosen) { giveUp('第 ' + (qi + 1) + ' 题无法匹配选项'); return; }
-                                    try { chosen.el.click(); } catch (e) { /* ignore */ }
-                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + String(chosen.text || '').slice(0, 40), 'color:#9C27B0');
+                                    const chosenList = this._llmPickOptions(options, answer);
+                                    if (!chosenList.length) {
+                                        // F32：失败时打印足够诊断信息（答案原文/LLM 原始输出/选项快照），便于人工定位。
+                                        console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题无法匹配选项：answer=' + JSON.stringify(String(answer || '').slice(0, 40))
+                                            + ' ｜ llmRaw=' + JSON.stringify(String(content || '').slice(0, 120))
+                                            + ' ｜ options=' + options.map((o) => o.letter + ':' + String(o.text || '').slice(0, 16)).join(' | '), 'color:#FF9800');
+                                        giveUp('第 ' + (qi + 1) + ' 题无法匹配选项');
+                                        return;
+                                    }
+                                    chosenList.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
+                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + chosenList.map((c) => String(c.text || '').slice(0, 24)).join(' / '), 'color:#9C27B0');
                                     askNext(qi + 1);
                                 },
                                 (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))

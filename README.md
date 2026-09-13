@@ -28,13 +28,15 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F24 | 同节点多视频只能串行播，节点耗时长（实验特性） | 用户提议（错播/并发探索） | 可选 `concurrentPlayback`（默认关闭）：错开启动同节点最多 `concurrentLanes` 路视频，副车道被平台暂停时自动静音重播（受 `laneMaxReplaysPerUnit` 上限）；真机验证并发的第二路在 206/218s 被平台正常标记完成（服务端按 objectId 独立计数）。保活 tick 复用既有视频监控循环，不新增定时器 |
 
+| F32 | 内嵌作业选项匹配偶发失败（真机：第 9 题无法匹配选项 → 整份作业放弃并卡住） | 真机演练 | 选项匹配增强：纯字母 / 夹带字母（选B、B选项、B（xxx））/ 多选字母（B、C）/ 去标点括号的包含匹配；匹配失败时打印 answer、LLM 原始输出与选项快照，便于人工定位 |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
 - [v3_optimized.user.js](v3_optimized.user.js) —— Tampermonkey 油猴版（构建产物）
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F24，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F32，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)

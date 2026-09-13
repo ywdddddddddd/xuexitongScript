@@ -14,6 +14,7 @@
  *   F22 手动暂停/切节点后恢复：僵尸 iframe 文档里的 video 不再被复用，超时自动重新定位
  *   F23 页面「完成条件 ≥X%」识别 + 多任务点片尾提前交接（省掉最后 10%）
  *   F24 同节点多视频并发（错开启动 + 副车道保活重播，实验特性）
+ *   F32 内嵌作业选项匹配增强（字母/夹带字母/多选/标点文本）与失败诊断
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -955,6 +956,26 @@ test('F24-3 副车道重播次数受上限约束', async () => {
     for (let i = 0; i < 4; i++) { await env.advance(1200); v2.paused = true; }
     check('F24-3 重播次数不超过上限', app._laneReplays <= 2, 'replays=' + app._laneReplays);
     check('F24-3 达到上限后打印提示', env.xt.has('重播已达上限'), '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F32 内嵌作业选项匹配增强（真机复现：第 9 题无法匹配选项 → 整份作业放弃）
+// ---------------------------------------------------------------------------
+
+test('F32-1 选项匹配增强：纯字母/夹带字母/多选/标点文本/无匹配', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const mk = (letter, text) => ({ el: {}, text: letter + ' ' + text, letter });
+    const opts = [mk('A', '不锈钢'), mk('B', '钛及钛合金'), mk('C', '陶瓷'), mk('D', '复合材料')];
+    check('F32-1 纯字母 B', app._llmPickOption(opts, 'B') === opts[1], '');
+    check('F32-1 「选B」', app._llmPickOption(opts, '选B') === opts[1], '');
+    check('F32-1 「B选项」', app._llmPickOption(opts, 'B选项') === opts[1], '');
+    check('F32-1 「B（钛及钛合金）」', app._llmPickOption(opts, 'B（钛及钛合金）') === opts[1], '');
+    check('F32-1 多选「B、C」返回两项', (() => { const r = app._llmPickOptions(opts, 'B、C'); return r.length === 2 && r[0] === opts[1] && r[1] === opts[2]; })(), '');
+    check('F32-1 文本匹配（带句号标点）', app._llmPickOption(opts, '钛及钛合金。') === opts[1], '');
+    check('F32-1 无匹配返回空数组', app._llmPickOptions(opts, '完全无关的答案').length === 0, '');
+    check('F32-1 兼容旧接口 _llmPickOption 返回 null', app._llmPickOption(opts, '完全无关的答案') === null, '');
     app.destroy();
 });
 
