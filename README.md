@@ -46,6 +46,8 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F41 | 作业题点击偶发不生效 → 有效作答 10/11 上锁卡死（真机：第 1 题点击丢失） | 真机演练 | 点击选项后校验平台选中态（aria-checked/class），未生效自动重试（≤3 次、间隔 350ms）；作业与互动题共用该逻辑 |
 
+| F43 | 两层作业帧（work 模块 → doHomeWorkNew）定位失败报「未能定位测验内容」；随后作业题被**误当视频互动弹窗**抢答卡死 | 真机演练（术中外科并发症） | `_quizDocOf` 递归下钻嵌套帧找 `.TiMu`；`_findInteractionDialog` **跳过作业帧**（src 含 `/modules/work/`、`doHomeWorkNew` 或 jobid 以 `work-` 开头）；作业作答中不做互动弹窗判定 |
+
 ## 文件说明
 
 - [v3_optimized.js](v3_optimized.js) —— 唯一源码（控制台直接执行版）
@@ -53,7 +55,7 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [resource/font_map_table.json](resource/font_map_table.json)（上游 Samueli924/chaoxing，MIT）与 [resource/font-map-data.js](resource/font-map-data.js)（自动生成的紧凑表，供 F34 使用）
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F41，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F43，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
