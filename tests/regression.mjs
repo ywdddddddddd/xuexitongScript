@@ -25,6 +25,7 @@
  *   F40 题目预检放宽：4~5 字短题（带问号/选项）不再误锁（真机：眶下孔位于？）
  *   F41 选项点击后校验选中态并自动重试（真机：第 1 题点击丢失 → 10/11 上锁）
  *   F42 康熙部首表替换 + 多 font-cxsecret 字体 + 互动弹窗 DOM 诊断
+ *   F43 作业题定位支持嵌套帧 + 作业帧不再被误判为互动弹窗
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1308,6 +1309,47 @@ test('F42-3 互动弹窗找不到提交按钮时输出 DOM 诊断', async () => 
     const found = { el: dlg, text: '互动题' };
     app._applyInteractionAnswer(found, [], { answer: 'A', picked: [{ el: opt, text: 'A 选项' }], raw: '' });
     check('F42-3 打印弹窗诊断快照', env.xt.has('弹窗诊断'), JSON.stringify(env.xt.logs.slice(-4)));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F43 作业题嵌套帧定位 + 作业帧不作为互动弹窗（真机：术中外科并发症节点卡死）
+// ---------------------------------------------------------------------------
+
+async function buildWorkFrame(env, modId) {
+    const modDoc = await frameDoc(env, modId);
+    modDoc.body.innerHTML = '<iframe id="inner" src="about:blank"></iframe>';
+    for (let i = 0; i < 6; i++) {
+        const inner = modDoc.getElementById('inner');
+        if (inner && inner.contentDocument && inner.contentDocument.body) return inner.contentDocument;
+        await new Promise((r) => setImmediate(r));
+    }
+    throw new Error('嵌套作业帧创建失败');
+}
+
+test('F43-1 作业题定位支持嵌套帧（work 模块 → doHomeWorkNew）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>'
+        + '<iframe id="workmod" jobid="work-123" src="about:blank"></iframe>' });
+    const innerDoc = await buildWorkFrame(env, 'workmod');
+    innerDoc.body.innerHTML = '<div class="TiMu"><div class="Zy_TItle"><span class="newZy_TItle">【单选题】</span>种植术后最常见并发症是？</div><ul class="Zy_ulTop"><li aria-checked="false">A 出血</li><li aria-checked="false">B 感染</li></ul></div>';
+    const app = await env.boot();
+    const quiz = app._quizDocOf(env.window.document.getElementById('workmod'));
+    check('F43-1 递归定位到嵌套作业帧', !!quiz && !!(quiz.doc && quiz.doc.querySelector('.TiMu')), quiz ? 'ok' : 'null');
+    app.destroy();
+});
+
+test('F43-2 作业帧不会被误判为视频互动弹窗', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>'
+        + '<iframe id="workmod" jobid="work-123" src="about:blank"></iframe>'
+        + '<iframe id="fakevideo" src="about:blank"></iframe>' });
+    const innerDoc = await buildWorkFrame(env, 'workmod');
+    innerDoc.body.innerHTML = '<div class="Zy_TItle">请选择正确的答案 A 甲 B 乙</div><ul><li>A 甲</li><li>B 乙</li></ul>';
+    await writeFrame(env, 'fakevideo', '<div class="Zy_TItle">请选择正确的答案 A 甲 B 乙</div><ul><li>A 甲</li><li>B 乙</li></ul>');
+    const app = await env.boot();
+    const found = app._findInteractionDialog(env.window.document, 0);
+    check('F43-2 命中真实视频帧', !!found && String(found.text).indexOf('请选择') >= 0, JSON.stringify(found && found.text));
+    env.window.document.getElementById('fakevideo').remove();
+    check('F43-2 仅剩作业帧时返回 null', app._findInteractionDialog(env.window.document, 0) === null, '');
     app.destroy();
 });
 

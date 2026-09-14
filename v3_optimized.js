@@ -2172,12 +2172,18 @@
                 }
                 for (const frame of frames) {
                     let frameDoc = null;
+                    let frameSrc = '';
+                    let frameJobid = '';
                     try {
                         frameDoc = frame.contentDocument || (frame.contentWindow ? frame.contentWindow.document : null);
+                        frameSrc = String(frame.getAttribute('src') || '');
+                        frameJobid = String(frame.getAttribute('jobid') || '');
                     } catch (e) {
                         frameDoc = null;
                     }
                     if (!frameDoc) continue;
+                    // F43：作业页的题目绝不能被当成「视频互动弹窗」——真机：作业题被弹窗流程抢答后卡死。
+                    if (/\/modules\/work\/|doHomeWorkNew/.test(frameSrc) || frameJobid.indexOf('work-') === 0) continue;
                     const nested = this._findInteractionDialog(frameDoc, depth + 1);
                     if (nested) return nested;
                 }
@@ -2185,6 +2191,8 @@
             },
             _checkInteractionDialog() {
                 if (!this.configs.interactionGuard) return null;
+                // F43：内嵌作业作答进行中，作业流程自己会处理题目；避免互动监视器抢答。
+                if (this._workBusy) return null;
                 // 章节测验页自身就有题目容器：那里沿用原有的「受限跳转」逻辑，不做互动弹窗判定，
                 // 避免把正常章节测验误判成视频互动弹窗。
                 if (this._isChapterTest()) return null;
@@ -3266,21 +3274,30 @@
                 try { return this._findUnfinishedWorks().some((w) => !w.finished); } catch (e) { return false; }
             },
             _quizDocOf(workFrame) {
-                let doc = null;
-                try { doc = workFrame.contentDocument; } catch (e) { doc = null; }
-                if (!doc) return null;
-                let inner = null;
-                try { inner = doc.querySelector('#frame_content'); } catch (e) { inner = null; }
-                if (inner) {
+                // F43（V3.6 补丁）：作业模块是「work 模块 iframe → doHomeWorkNew iframe」两层结构，
+                // 以前只在第一层找 .TiMu/textarea，导致「未能定位测验内容」而停止（真机：术中外科并发症）。
+                const findQuiz = (doc, depth) => {
+                    if (!doc || depth > 4) return null;
                     try {
-                        const d = inner.contentDocument;
-                        if (d && d.querySelector && d.querySelector('.TiMu')) return { doc: d, win: d.defaultView, frame: inner };
+                        if (doc.querySelector && (doc.querySelector('.TiMu') || doc.querySelector('textarea[id^="answer"]'))) {
+                            return { doc: doc, win: doc.defaultView, frame: null };
+                        }
                     } catch (e) { /* ignore */ }
-                }
-                try {
-                    if (doc.querySelector && doc.querySelector('.TiMu')) return { doc: doc, win: doc.defaultView, frame: null };
-                } catch (e) { /* ignore */ }
-                return null;
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const f of frames) {
+                        let child = null;
+                        try { child = f.contentDocument || (f.contentWindow ? f.contentWindow.document : null); } catch (e) { child = null; }
+                        if (!child) continue;
+                        const hit = findQuiz(child, depth + 1);
+                        if (hit) { hit.frame = f; return hit; }
+                    }
+                    return null;
+                };
+                let base = null;
+                try { base = workFrame.contentDocument || (workFrame.contentWindow ? workFrame.contentWindow.document : null); } catch (e) { base = null; }
+                if (!base) return null;
+                return findQuiz(base, 0);
             },
             // ================= F17（V3.6）：font-cxsecret 字形解密 =================
             // 原理：平台用「思源黑体子集」做反copy字体（乱码 codepoint → 真实字形）。系统装有 Noto Sans SC
