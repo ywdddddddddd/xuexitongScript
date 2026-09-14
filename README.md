@@ -26,15 +26,15 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F23 | 多视频任务点小节：非最后一个任务点要播到 100% 才切换（每个视频白播最后 10%） | 用户反馈（页面「完成条件 ≥90%」文案） | 新增「完成条件」文案识别（解析 90%/100% 等比例并缓存到本小节）；**当前任务点**已被平台标记完成且播放达比例时，立即切下一个视频任务点，不再等 `ended`（真机实测：984s 视频在 92.0% 被标记，单任务点省约 79s；4 任务点节点合计约 5 分钟） |
 
-| F24 | 同节点多视频只能串行播，节点耗时长（实验特性） | 用户提议（错播/并发探索） | 可选 `concurrentPlayback`（默认关闭）：错开启动同节点最多 `concurrentLanes` 路视频，副车道被平台暂停时自动静音重播（受 `laneMaxReplaysPerUnit` 上限）；真机验证并发的第二路在 206/218s 被平台正常标记完成（服务端按 objectId 独立计数）。保活 tick 复用既有视频监控循环，不新增定时器 |
+| F24 | 同节点多视频只能串行播，节点耗时长（实验特性） | 用户提议（错播/并发探索） | 可选 `concurrentPlayback`（默认关闭）：错开启动同节点最多 `concurrentLanes` 路视频，副车道被平台暂停时自动静音重播（受 `laneMaxReplaysPerUnit` 上限）；真机验证并发的第二路在 206/218s 被平台正常标记完成（服务端按 objectId 独立计数）。保活 tick 复用既有视频监控循环，不新增定时器；**实测整体吞吐无明显提升（平台仲裁导致交错播放），F37b 起保持默认关闭** |
 
-| F32 | 内嵌作业选项匹配偶发失败（真机：第 9 题无法匹配选项 → 整份作业放弃并卡住） | 真机演练 | 选项匹配增强：纯字母 / 夹带字母（选B、B选项、B（xxx））/ 多选字母（B、C）/ 去标点括号的包含匹配；匹配失败时打印 answer、LLM 原始输出与选项快照，便于人工定位 |
+| F32 | 内嵌作业选项匹配偶发失败（真机：第 9 题无法匹配选项 → 整份作业放弃并卡住） | 真机演练 | 选项匹配增强：纯字母 / 夹带字母（选B、B选项、B（xxx））/ 多选字母（B、C）/ 去标点括号的包含匹配（后续 F35 将匹配统一为上游降级链）；匹配失败时打印 answer、LLM 原始输出与选项快照，便于人工定位 |
 
-| F33 | 直播节点落入未知节点流程；LLM 无节流无缓存降级；选项匹配缺相似度兜底 | 用户优化提案 | 直播节点识别（标题/内容帧/全文无 video）→ 安全停止 + 针对性提示；`llmMinIntervalMs` 最小间隔+抖动；答案缓存（题干→答案，内存 LRU 500）实现 LLM→缓存→人工 降级链；选项相似度兜底（Dice ≥ 0.8）；`docTaskScroll`/`concurrentPlayback` 改为默认开启 |
+| F33 | 直播节点落入未知节点流程；LLM 无节流无缓存降级；选项匹配缺相似度兜底 | 用户优化提案 | 直播节点识别（标题/内容帧/全文无 video）→ 安全停止 + 针对性提示；`llmMinIntervalMs` 最小间隔+抖动；答案缓存（题干→答案，内存 LRU 500）实现 LLM→缓存→人工 降级链；选项相似度兜底（后续 F35 统一为上游 SequenceMatcher 链路）；`docTaskScroll` 改为默认开启（`concurrentPlayback` 曾默认开启，F37b 实测无提速后关闭） |
 
 | F34 | font-cxsecret 位图匹配依赖系统 Noto Sans SC、且主线程 2 万次渲染卡顿 | 上游 Samueli924/chaoxing 移植 | 移植 glyf 坐标哈希解密：TTF/WOFF 解析 → 字形 MD5 → 查 `resource/font-map-data.js`（由上游 1.6MB 表压缩为 709KB 的 18B/条映射）；确定性、毫秒级、无系统字体依赖；表缺失时自动回退位图 |
 | F35 | 选项匹配为自研 Dice 兜底，与上游语义不一致 | 上游 api/base.py 移植 | 改为上游降级链：`clean_res` → `normalize_text`（含异体字归一）→ `is_subsequence` → `SequenceMatcher.ratio ≥ 0.8`（difflib 等价实现）|
-| F36 | 无法增加章节学习次数 | 上游 api/base.py `_extract_and_send_setlog` 移植 | `chapterStudyCount>0` 时周期性请求 `studentstudyAjax`，从响应提取 `fystat-ans.../log/setlog` 并触发；HTTP 走油猴 GM 或宿主注入 `app.setHttpTransport(fn)` |
+| F36 | 无法增加章节学习次数 | 上游 api/base.py `_extract_and_send_setlog` 移植 | `chapterStudyCount>0` 时周期性请求 `studentstudyAjax`，从响应提取 `fystat-ans.../log/setlog` 并触发；`studentstudyAjax` 走油猴 GM/宿主注入传输；setlog 为跨域，改用**隐藏 iframe 信标**触发（F36b，绕开 CORS） |
 
 | F37 | 内嵌作业多选题作答失败卡死（LLM 回显模板「选项字母」/推理泄漏无 JSON/只点一个选项） | 真机演练（第 9 题） | 答案解析拒绝占位符、支持多字母（"B、C"/"A和C"/数组）；多选自动识别（checkbox 或标题含多选）并按多字母匹配点击；解析失败自动重试一次（严格 JSON 提示）；互动题在 LLM 请求在途时等待完成再自动作答（不再降级人工） |
 
@@ -47,6 +47,8 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 | F41 | 作业题点击偶发不生效 → 有效作答 10/11 上锁卡死（真机：第 1 题点击丢失） | 真机演练 | 点击选项后校验平台选中态（aria-checked/class），未生效自动重试（≤3 次、间隔 350ms）；作业与互动题共用该逻辑 |
 
 | F43 | 两层作业帧（work 模块 → doHomeWorkNew）定位失败报「未能定位测验内容」；随后作业题被**误当视频互动弹窗**抢答卡死 | 真机演练（术中外科并发症） | `_quizDocOf` 递归下钻嵌套帧找 `.TiMu`；`_findInteractionDialog` **跳过作业帧**（src 含 `/modules/work/`、`doHomeWorkNew` 或 jobid 以 `work-` 开头）；作业作答中不做互动弹窗判定 |
+
+> 编号说明：F25–F31 为 2026-09-13 日志审计提出的候选修复（未实施，保留编号空档），当前实现从 F32 起连续编号至 F43。
 
 ## 文件说明
 
