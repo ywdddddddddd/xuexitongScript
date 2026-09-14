@@ -3078,6 +3078,17 @@
                 const submitEl = this._findInteractionSubmit(found);
                 if (!submitEl) {
                     console.warn('%c[LLM] 未找到提交/继续按钮：答案已选好，请手动提交（弹窗消失后脚本自动恢复）', 'color:#FF9800');
+                    try {
+                        // F42：诊断 dump —— 记录弹窗 DOM 与候选控件，便于下一次精准补按钮识别。
+                        const scope = (found && found.el) || null;
+                        const snap = scope ? String(scope.outerHTML || '').replace(/\s+/g, ' ').slice(0, 600) : '(no-scope)';
+                        let cands = '';
+                        if (scope && scope.querySelectorAll) {
+                            cands = Array.from(scope.querySelectorAll('button,a,[class*="btn"],[class*="Btn"],[onclick]')).slice(0, 10)
+                                .map((el) => el.tagName + '.' + String(el.className || '').slice(0, 24) + '[' + String(el.textContent || '').replace(/\s+/g, '').slice(0, 10) + ']').join(' § ');
+                        }
+                        console.warn('%c[LLM] 弹窗诊断: ' + snap + ' ｜ 候选: ' + cands, 'color:#607D8B');
+                    } catch (e) { /* ignore */ }
                     return;
                 }
                 if (!this.configs.llmAutoSubmit) {
@@ -3533,38 +3544,69 @@
                 }
                 return this._cxParseSfnt(buf);
             },
+            _kxRadicalTable() {
+                // F42：移植上游 KX_RADICALS_TAB（康熙部首 → 常规汉字）。缺这一步，解密文本会残留
+                // ⽛/⼒/⼆/⻣ 之类的部首字（上游 decrypt 末尾有此替换表）。
+                if (this._kxRadicals) return this._kxRadicals;
+                const from = "⼀⼁⼂⼃⼄⼅⼆⼇⼈⼉⼊⼋⼌⼍⼎⼏⼐⼑⼒⼓⼔⼕⼖⼗⼘⼙⼚⼛⼜⼝⼞⼟⼠⼡⼢⼣⼤⼥⼦⼧⼨⼩⼪⼫⼬⼭⼮⼯⼰⼱⼲⼳⼴⼵⼶⼷⼸⼹⼺⼻⼼⼽⼾⼿⽀⽁⽂⽃⽄⽅⽆⽇⽈⽉⽊⽋⽌⽍⽎⽏⽐⽑⽒⽓⽔⽕⽖⽗⽘⽙⽚⽛⽜⽝⽞⽟⽠⽡⽢⽣⽤⽥⽦⽧⽨⽩⽪⽫⽬⽭⽮⽯⽰⽱⽲⽳⽴⽵⽶⽷⽸⽹⽺⽻⽼⽽⽾⽿⾀⾁⾂⾃⾄⾅⾆⾇⾈⾉⾊⾋⾌⾍⾎⾏⾐⾑⾒⾓⾔⾕⾖⾗⾘⾙⾚⾛⾜⾝⾞⾟⾠⾡⾢⾣⾤⾥⾦⾧⾨⾩⾪⾫⾬⾭⾮⾯⾰⾱⾲⾳⾴⾵⾶⾷⾸⾹⾺⾻⾼髙⾽⾾⾿⿀⿁⿂⿃⿄⿅⿆⿇⿈⿉⿊⿋⿌⿍⿎⿏⿐⿑⿒⿓⿔⿕⺠⻬⻩⻢⻜⻅⺟⻓";
+                const to = "一丨丶丿乙亅二亠人儿入八冂冖冫几凵刀力勹匕匚匸十卜卩厂厶又口囗土士夂夊夕大女子宀寸小尢尸屮山巛工己巾干幺广廴廾弋弓彐彡彳心戈戶手支攴文斗斤方无日曰月木欠止歹殳毋比毛氏气水火爪父爻爿片牙牛犬玄玉瓜瓦甘生用田疋疒癶白皮皿目矛矢石示禸禾穴立竹米糸缶网羊羽老而耒耳聿肉臣自至臼舌舛舟艮色艸虍虫血行衣襾見角言谷豆豕豸貝赤走足身車辛辰辵邑酉采里金長門阜隶隹雨青非面革韋韭音頁風飛食首香馬骨高高髟鬥鬯鬲鬼魚鳥鹵鹿麥麻黃黍黑黹黽鼎鼓鼠鼻齊齒龍龜龠民齐黄马飞见母长";
+                const map = Object.create(null);
+                for (let i = 0; i < from.length; i++) {
+                    if (to[i]) map[from[i]] = to[i];
+                }
+                this._kxRadicals = map;
+                return map;
+            },
+            _cxApplyKxRadicals(text) {
+                const map = this._kxRadicalTable();
+                const s = String(text == null ? '' : text);
+                let out = '';
+                for (const ch of s) out += (map[ch] || ch);
+                return out;
+            },
             async _cxFontDecodeChars(b64, chars) {
-                // F34：对给定汉字逐一 glyf 哈希 → 查表得到真字；返回 { map, hit, total }。
+                // F42：支持多字体（b64 可为字符串或数组）——逐字体尝试，直到命中。
                 const table = this._cxFontHashMap();
-                if (!table || !b64) return null;
-                const font = await this._cxFontFromB64(b64);
-                if (!font) return null;
+                const fontsB64 = (Array.isArray(b64) ? b64 : [b64]).filter(Boolean);
+                if (!table || !fontsB64.length) return null;
+                const fonts = [];
+                for (const one of fontsB64) {
+                    const f = await this._cxFontFromB64(one);
+                    if (f) fonts.push(f);
+                }
+                if (!fonts.length) return null;
                 const map = {};
                 let hit = 0;
                 const list = Array.isArray(chars) ? chars : Array.from(String(chars || ''));
                 for (const ch of list) {
-                    const gid = font.cmap.get(ch.charCodeAt(0));
-                    const hash = (gid != null) ? this._cxGlyphHash(font, gid) : '';
-                    const real = hash ? table.get(hash) : null;
-                    if (real && real !== ch) { map[ch] = real; hit++; }
+                    let real = null;
+                    for (const font of fonts) {
+                        const gid = font.cmap.get(ch.charCodeAt(0));
+                        const hash = (gid != null) ? this._cxGlyphHash(font, gid) : '';
+                        const found = hash ? table.get(hash) : null;
+                        if (found) { real = found; break; }
+                    }
+                    if (real && real !== ch) { map[ch] = this._cxApplyKxRadicals(real); hit++; }
                 }
-                return { map: map, hit: hit, total: list.length, font: font };
+                return { map: map, hit: hit, total: list.length, font: fonts[0] };
             },
-            _cxSecretFontB64() {
-                if (this._cxFontB64) return this._cxFontB64;
-                let found = '';
-                const seen = new Set();
+            _cxSecretFontsB64() {
+                // F42（V3.6 补丁）：页面可能有多个 font-cxsecret 字体（不同题组不同子集）；
+                // 只取第一个会导致部分字解密失败/命中率低。这里全部收集并去重。
+                if (this._cxFontsB64) return this._cxFontsB64;
+                const out = [];
+                const seenDocs = new Set();
                 const visit = (doc, depth) => {
-                    if (!doc || depth > 6 || found || seen.has(doc)) return;
-                    seen.add(doc);
+                    if (!doc || depth > 6 || seenDocs.has(doc)) return;
+                    seenDocs.add(doc);
                     try {
                         for (const sheet of Array.from(doc.styleSheets || [])) {
                             try {
                                 for (const rule of Array.from(sheet.cssRules || [])) {
                                     const t = rule.cssText || '';
                                     if (t.indexOf('font-cxsecret') >= 0 && t.indexOf('base64,') >= 0) {
-                                        found = t.split('base64,')[1].split('"')[0].split(')')[0];
-                                        return;
+                                        const data = t.split('base64,')[1].split('"')[0].split(')')[0];
+                                        if (data && out.indexOf(data) < 0) out.push(data);
                                     }
                                 }
                             } catch (e) { /* 跨域样式表 */ }
@@ -3579,8 +3621,12 @@
                     } catch (e) { /* ignore */ }
                 };
                 visit(typeof document === 'undefined' ? null : document, 0);
-                this._cxFontB64 = found;
-                return found;
+                this._cxFontsB64 = out;
+                return out;
+            },
+            _cxSecretFontB64() {
+                const list = this._cxSecretFontsB64();
+                return list.length ? list[0] : '';
             },
             _cxSecretDecode(texts, cb) {
                 const list = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t == null ? '' : t));
@@ -3596,9 +3642,10 @@
                 if (!chars.length) { done(list); return; }
                 const cached = this._cxSecretMap || (this._cxSecretMap = {});
                 const todo = chars.filter((ch) => !Object.prototype.hasOwnProperty.call(cached, ch));
-                const finish = () => done(list.map((t) => t.replace(/[\u4e00-\u9fa5]/g, (ch) => (Object.prototype.hasOwnProperty.call(cached, ch) ? cached[ch] : ch))));
+                const finish = () => done(list.map((t) => this._cxApplyKxRadicals(t.replace(/[\u4e00-\u9fa5]/g, (ch) => (Object.prototype.hasOwnProperty.call(cached, ch) ? cached[ch] : ch)))));
                 if (!todo.length) { finish(); return; }
-                const b64 = this._cxSecretFontB64();
+                const fontList = this._cxSecretFontsB64();
+                const b64 = fontList[0] || '';
                 if (!b64) { console.warn('%c[字库解密] 未找到 font-cxsecret 字体，跳过解码', 'color:#FF9800'); finish(); return; }
                 const run = () => {
                     try {
@@ -3669,7 +3716,7 @@
                 // F34：优先 glyf 哈希解密（上游算法，确定性 + 无系统字体依赖）；未命中则回退位图。
                 if (String(this.configs.cxSecretFontMode || 'auto') !== 'bitmap' && this._cxFontHashMap()) {
                     const self = this;
-                    this._cxFontDecodeChars(b64, chars).then((res) => {
+                    this._cxFontDecodeChars(fontList, chars).then((res) => {
                         if (res && res.hit > 0) {
                             for (const k in res.map) { if (Object.prototype.hasOwnProperty.call(res.map, k)) cached[k] = res.map[k]; }
                             console.log('%c[字库解密] glyf 哈希命中 ' + res.hit + '/' + res.total + ' 字（上游 Samueli924/chaoxing 算法）', 'color:#4CAF50');

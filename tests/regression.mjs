@@ -24,6 +24,7 @@
  *   F39 作答判定支持平台选中态（aria-checked/class）+ 单选护栏 + 提交按钮识别放宽
  *   F40 题目预检放宽：4~5 字短题（带问号/选项）不再误锁（真机：眶下孔位于？）
  *   F41 选项点击后校验选中态并自动重试（真机：第 1 题点击丢失 → 10/11 上锁）
+ *   F42 康熙部首表替换 + 多 font-cxsecret 字体 + 互动弹窗 DOM 诊断
  *   F4 不再劫持 document/window 的 mouseout/mouseleave；恢复播放受冷却与次数上限约束
  *   F5 互动答题弹窗检测与暂停跳转（默认等人工）；F9 GUI 面板；F10 LLM 应答仅显式开启
  *   F6 _getVideoEl 选择器覆盖、嵌套 frame 深度上限、切换小节时缓存失效
@@ -1265,6 +1266,48 @@ test('F41-2 点击校验重试：第 2 次点击才生效 → 成功回调；始
     app._clickWithVerification([{ el: el2 }], (err) => { r2 = err ? err.message : 'ok'; });
     await env.advance(3000);
     check('F41-2 始终无效时明确报错', String(r2).indexOf('未生效') >= 0 && clicks2 >= 3, 'r=' + r2 + ' clicks=' + clicks2);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F42 康熙部首替换 + 多字体解密 + 弹窗诊断（真机：解密残留 ⽛/⼒/⼆、命中率低）
+// ---------------------------------------------------------------------------
+
+test('F42-1 康熙部首替换（移植上游 KX_RADICALS_TAB）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    check('F42-1 ⽛槽骨…⼒ → 牙槽骨…力', app._cxApplyKxRadicals('⽛槽骨吸收与咬合⼒无关') === '牙槽骨吸收与咬合力无关', app._cxApplyKxRadicals('⽛槽骨吸收与咬合⼒无关'));
+    check('F42-1 第⼆磨⽛ → 第二磨牙', app._cxApplyKxRadicals('第⼆磨⽛') === '第二磨牙', app._cxApplyKxRadicals('第⼆磨⽛'));
+    check('F42-1 普通文本不受影响', app._cxApplyKxRadicals('口腔种植学') === '口腔种植学', '');
+    app.destroy();
+});
+
+test('F42-2 多字体：跳过坏字体后在第二个字体命中（真机命中率低）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const fontB64 = readFileSync(resolve(repoRoot, 'tests/fixtures/font-cxsecret/font.b64'), 'utf8').trim();
+    const mapB64 = readFileSync(resolve(repoRoot, 'tests/fixtures/font-cxsecret/font-map.mini.b64'), 'utf8').trim();
+    env.window.__XT_FONT_MAP_B64 = mapB64;
+    const encrypted = '砲抰材抲是现抳口抮抰植体最常用抪材抲';
+    const res = await app._cxFontDecodeChars(['AAEAAA', fontB64], Array.from(encrypted));
+    check('F42-2 坏字体被跳过、第二字体命中 ≥6', !!res && res.hit >= 6, 'hit=' + (res ? res.hit : 'null'));
+    const decoded = Array.from(encrypted).map((ch) => (res && res.map[ch]) || ch).join('');
+    check('F42-2 多字体解码结果正确', decoded === '哪种材料是现代口腔种植体最常用的材料', decoded);
+    app.destroy();
+});
+
+test('F42-3 互动弹窗找不到提交按钮时输出 DOM 诊断', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const doc = env.window.document;
+    const dlg = doc.createElement('div');
+    dlg.className = 'answerQuestion';
+    const opt = doc.createElement('div');
+    opt.textContent = 'A 选项';
+    dlg.appendChild(opt);
+    const found = { el: dlg, text: '互动题' };
+    app._applyInteractionAnswer(found, [], { answer: 'A', picked: [{ el: opt, text: 'A 选项' }], raw: '' });
+    check('F42-3 打印弹窗诊断快照', env.xt.has('弹窗诊断'), JSON.stringify(env.xt.logs.slice(-4)));
     app.destroy();
 });
 
