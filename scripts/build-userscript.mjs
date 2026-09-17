@@ -18,6 +18,7 @@ const metadata = `// ==UserScript==
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      opencode.ai
+// @connect      groupweb.chaoxing.com
 // ==/UserScript==
 
 `;

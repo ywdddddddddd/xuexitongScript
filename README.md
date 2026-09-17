@@ -16,7 +16,7 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 | F4 | 异常暂停反复抢播、弹出验证码 | #19 #26 #32 #54 #55（台阶依据 PR #56 的《ISSUES_REVIEW V3.4》） | 删除 document/window 上的 mouseout/mouseleave 事件劫持；判断「真播放」改为跟踪 `currentTime` 是否增长；保活阶梯＝每秒检查 → 7 秒无进度 → `pause/play` → 2.5 秒复检 → 仍无进度则回拨 0.15s 重播（回拨与恢复共用每小节 5 次预算）；恢复只在「非用户主动暂停且进度确实停滞」时触发；`play()` 有 8 秒超时保护；`destroy()` 清理全部定时器 |
 | F5 | 视频中弹互动题后卡死 | #29 #39 #42（参考 PR #53 的检测思路） | 默认：检测到互动答题弹窗时暂停自动跳转并提示人工处理；显式开启 `llmEnabled` 后可选由 LLM 选择答案（F10），失败/未配置密钥一律回退人工 |
 | F9 | 运行情况只能看控制台，不直观 | V3.5 | 右上角注入可折叠 GUI 监控面板：状态、进度、LLM 状态、实时日志与快捷按钮；纯本地 DOM，默认开启（`guiEnabled`） |
-| F10 | 互动题需要人工作答，挂机中断 | #29 #39 #42 #45 | 可选接入 OpenAI 兼容大模型接口（默认 `deepseek-flash`）：提取题干+选项→严格 JSON 输出→按答案点选；默认半自动（`llmAutoSubmit=false`），零密钥/超时/解析失败自动回退人工 |
+| F10 | 互动题需要人工作答，挂机中断 | #29 #39 #42 #45 | 可选接入 OpenAI 兼容大模型接口（默认 `minimax-m3`，并带 5 个备用模型的自动降级链，见 F53）：提取题干+选项→严格 JSON 输出→按答案点选；默认半自动（`llmAutoSubmit=false`），零密钥/超时/解析失败自动回退人工 |
 | F6 | 少量播放器识别不到 | #18 #52 #55（PR #48 的 frame 守卫思路） | 选择器覆盖 `video#video_html5_api`、`[id*=video_html5]`、`.vjs-tech`、`[src]`；嵌套 frame 搜索深度上限 `videoFrameMaxDepth`；切换小节或 iframe 重载时显式失效视频缓存；跨域 frame 抛 `SecurityError` 时静默跳过，不打印硬错误 |
 | F7 | 粘完没反应、文档链接 404 | #4 #5 #12 #16 #17 #23 #33 #47 | 启动超时/目录未就绪/jQuery CDN 被拦截时给出可操作提示；README 内链接全部指向仓库内真实文件，默认配置与代码保持一致 |
 
@@ -48,7 +48,11 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 
 | F43 | 两层作业帧（work 模块 → doHomeWorkNew）定位失败报「未能定位测验内容」；随后作业题被**误当视频互动弹窗**抢答卡死 | 真机演练（术中外科并发症） | `_quizDocOf` 递归下钻嵌套帧找 `.TiMu`；`_findInteractionDialog` **跳过作业帧**（src 含 `/modules/work/`、`doHomeWorkNew` 或 jobid 以 `work-` 开头）；作业作答中不做互动弹窗判定 |
 
-> 编号说明：F25–F31 为 2026-09-13 日志审计提出的候选修复（未实施，保留编号空档），当前实现从 F32 起连续编号至 F43。
+| F44 | 多文档任务点节点（真机 12 个 PDF）**第一个任务点就被判「滚动后任务点未标记完成」并停止自动前进**：平台已把它标记 `ans-job-finished`，脚本仍报未完成 | 真机演练（课程 16 口腔种植学 上课课件） | 完成判定从「全站是否还有未完成文档任务点」改为按**本任务点**收敛：新增 `_isDocTaskFinished(docTask)`（按 jobid 复查当前 DOM，任务点已移除视为完成），等待回调命中即 `_processDocTasks(docs, idx + 1, done)` 继续下一个任务点；全部完成仍经 idx 越界收敛为 `done(true)` → `play()`（原「绝不跳过、全部完成才前进」语义不变） |
+
+| F45 | **讨论任务点（insertbbs/BBS）无法自动完成**：节点含「讨论」任务点时脚本判为未知任务点，只能人工参与或手动 `nextUnit()` 跳过 | 真机演练（课程 16「2.3 种植修复诊疗方案设计」） | 新增讨论任务点全链路：`_findDiscussTaskFrames` 识别 `.ans-attach-ct` 内的 `insertbbs` 模块帧（该帧无 jobid，`data` 带 `mid/jobid`）；`_discussTopicUrl` 从讨论卡片 `#topicMainDiv[data]`（退化取章节讨论面板 `replysList` 链接）取话题 URL 并推导 origin；`_httpGet` 取话题页解析 `urlToken`；回复文本优先由 LLM 依话题内容生成（否则用 `discussReplyText`，都没有则**拒绝提交**）；`_httpPost` 提交 `POST {origin}/pc/invitation/{topicUuid}/addReplys`；随后 `_reloadDiscussCard` 重载讨论卡片，让平台自身链路（服务端 `isFinished` → 卡片 `postMessage{opType:'completeTopic'}` → `insertbbs greenligth()`）把任务点标记为 `ans-job-finished`。**绝不伪造完成**（不直接加 class、不跳过） |
+
+> 编号说明：F25–F31 为 2026-09-13 日志审计提出的候选修复（未实施，保留编号空档），当前实现从 F32 起连续编号至 F45。
 
 ## 文件说明
 
@@ -57,7 +61,7 @@ V3.6 在 V3.4/V3.5 基础上新增 F11 内嵌章节测验自动作答（默认�
 - [scripts/build-userscript.mjs](scripts/build-userscript.mjs) —— 由唯一源码生成油猴版
 - [resource/font_map_table.json](resource/font_map_table.json)（上游 Samueli924/chaoxing，MIT）与 [resource/font-map-data.js](resource/font-map-data.js)（自动生成的紧凑表，供 F34 使用）
 - [tests/verify-v3.mjs](tests/verify-v3.mjs) —— 校验两个入口逐字节同步且语法合法
-- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F43，不联网；LLM 用例使用注入传输，零真实网络）
+- [tests/regression.mjs](tests/regression.mjs) —— jsdom 回归测试（F1-F45，不联网；LLM 用例使用注入传输，零真实网络）
 - [ISSUES_REVIEW.md](ISSUES_REVIEW.md) —— V3.3 时期的问题复盘
 - [README_v2.md](README_v2.md)、[v2.js](v2.js) —— 历史版本的说明与 V2 脚本
 - [xuexitong.js](xuexitong.js) —— **历史版本（V1 控制台版），已不再维护**：本次只做了最小加固（入口点击的空值保护与多选择器兜底，F8），倍速、iframe 取视频等逻辑保持原样。**请不要再直接粘贴 V1 使用**，新用户请用 [v3_optimized.js](v3_optimized.js)
@@ -101,12 +105,17 @@ docTaskScrollStepMs: 800
 docTaskMaxMs: 240000
 docTaskWaitMs: 45000
 docTaskAttempts: 2
+discussTaskAuto: true
+discussReplyText: ''
+discussTaskWaitMs: 60000
 guiEnabled: true
 guiMaxLogLines: 60
 llmEnabled: false
 llmEndpoint: 'https://opencode.ai/zen/go/v1/chat/completions'
-llmModel: 'deepseek-flash'
-llmMaxTokens: 4096
+llmModel: 'deepseek-v4-flash'
+llmModelFallbacks: []
+llmModelFallbackOn: false
+llmMaxTokens: 2048
 llmJsonMode: true
 llmTimeoutMs: 30000
 llmMinIntervalMs: 800
@@ -134,7 +143,8 @@ llmWorkWaitMs: 90000
 - `llmMinIntervalMs`（默认 **800**，V3.6 补丁 F33）：LLM 请求最小间隔（含 0.7~1.3 随机抖动），连续作答时自动排队；防 429 与服务端风控。
 - `liveGuard`（默认 **true**，V3.6 补丁 F33）：识别直播任务点；命中时安全停止并给出针对性提示（绝不当作未知节点自动跳过）。
 - `llmMaxTokens`（默认 **4096**）：实测推理 token 可达 1600+，1024 会耗尽配额导致空响应（`finish_reason=length`），不建议调小。
-- `llmJsonMode`（默认 **true**）：请求体带 `response_format:{"type":"json_object"}`，约束模型只输出 JSON；自定义端点不支持该参数时设为 `false`。
+- `llmJsonMode`（默认 **true**）：请求体带 `response_format:{"type":"json_object"}`，约束模型只输出 JSON；自定义端点不支持该参数时设为 `false`。收到 HTTP 400（`invalid_request_error`）时脚本会自动去掉该参数重试同一模型一次，并把结论记在本会话内。
+- `llmModel` / `llmModelFallbacks` / `llmModelFallbackOn`（默认 `minimax-m3` + 5 个备用，V3.7 补丁 F53）：**模型降级链**。真机教训——`deepseek` 家族（`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4.1-flash`）在部分 key 上被地区门禁挡住，返回 `HTTP 403 RegionError`（"only available hosted in China and requires explicit opt in"），于是每题都在第 1 题失败 → 只暂存不提交 → 停机等人工，整条自动答题链路形同停摆。现在主模型遇到 **403/401/404/422 地区门禁或无权限、429 限流、5xx 网关错误、网络超时、空响应（`finish_reason=length`）、400 参数被拒** 时，会按 `llmModelFallbacks` 顺序自动切换，停在第一个可用模型并在本会话内粘性复用；只有**全部模型都失败**才回退原有安全策略（上锁 + 只暂存不提交，绝不产出可疑答案）。运行时可 `app.setLlmModels('主模型', ['备用1','备用2'])` 覆盖；设 `llmModelFallbackOn = false` 可关闭降级。
 - `llmAutoSubmit`（默认 **false**）：半自动档——脚本只替你选定答案，提交/继续按钮留给你点；设为 `true` 才会自动提交。
 - `llmChapterTest`（默认 **false**，实验性）：章节测验页只在面板给出建议答案，**绝不自动点击**；识别失败自动回退「受限跳过」。
 - `llmEmbeddedWork`（默认 **false**，V3.6 新增）：节点内嵌的「章节测验/作业」（work 任务点，如简答题）自动作答：LLM 填写答案后走平台原生提交流程（`btnBlueSubmit` → 确认弹窗 → 任务点标记完成）。**默认关闭时绝不跳过**——检测到未完成内嵌测验会停止自动前进并提示。
@@ -150,6 +160,7 @@ llmWorkWaitMs: 90000
 - `chapterStudyCount`（默认 **0**，V3.6 补丁 F36）：>0 时按上游流程增加章节学习次数（`studentstudyAjax` → setlog）；`chapterStudyDelayMs` 控制间隔（默认 2500ms）。需要 HTTP 传输：油猴版走 GM_xmlhttpRequest，控制台/演练由宿主注入 `app.setHttpTransport(fn)`。
 - `workSanityLock`（默认 **true**，V3.6 新增）：题目合格性预检 + 提交锁。给 AI 发请求前先校验题目（排除界面文案/过短/选项不足等异常），异常或未全部作答时**上锁拒绝提交**，交人工处理（修复真机演练中「编辑器外壳被当选项 → 提交空值」事故）。
 - `docTaskScroll`（默认 **true**，V3.6 补丁 F33 起默认开启；V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅：自动把文档滚动到底部并等待平台标记完成。如需关闭（例如担心翻页节奏），设 `docTaskScroll = false`，此时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）。
+- `discussTaskAuto`（默认 **true**，V3.6 F45 新增）：讨论任务点（insertbbs/BBS）自动参与。平台完成条件是该话题下有本人回复（服务端 `isFinished`），脚本会取话题页解析 `urlToken` 后提交一条回复，再重载讨论卡片让平台自己把任务点标记完成——**不会伪造完成状态**。回复文本优先由 LLM 依据话题内容生成；未开启 LLM 时须先设置 `discussReplyText`（固定文本），否则**拒绝提交并停止前进**（绝不跳过）。跨域取话题页/提交依赖 `GM_xmlhttpRequest`（油猴版已声明 `@connect groupweb.chaoxing.com`）；控制台/演练环境可用 `app.setHttpTransport((url, cb, opts) => …)` 注入并支持 `opts.method='POST'`，演练启动器 `tmp-verify/conductor.mjs` 已内置 **CDP 宿主 HTTP 桥**（页面经 `Runtime.addBinding` 请求 → Node 在同源 helper 标签页内 `fetch`，同源无 CORS、自动带 cookie），故演练可完整验证该链路。
 ## 使用方法
 
 ### 方法一：浏览器控制台

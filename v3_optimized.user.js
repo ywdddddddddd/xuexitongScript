@@ -10,6 +10,7 @@
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      opencode.ai
+// @connect      groupweb.chaoxing.com
 // ==/UserScript==
 
 // 自动生成：勿手改。源: resource/font_map_table.json（上游 Samueli924/chaoxing）
@@ -165,6 +166,13 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 docTaskMaxMs: 240000,
                 docTaskWaitMs: 45000,
                 docTaskAttempts: 2,
+                // F45（V3.6）：讨论任务点（insertbbs/BBS）自动参与。默认开启。
+                // 平台完成条件 = 该话题下有学生的回复（服务端 isFinished）→ 讨论卡片 postMessage → insertbbs 标记 ans-job-finished。
+                // 回复文本优先由 LLM 依据话题内容生成；未开 LLM 时用 discussReplyText 固定文本；两者皆无则不提交并停止自动前进（绝不伪造完成）。
+                discussTaskAuto: true,
+                discussReplyText: '',
+                // 提交回复后等待平台标记完成的窗口（需重载讨论卡片触发服务端 isFinished 链路）。
+                discussTaskWaitMs: 60000,
                 // F9（V3.5）：GUI 可视化面板。纯本地 DOM，不产生任何额外网络请求。
                 guiEnabled: true,
                 guiMaxLogLines: 60,
@@ -172,12 +180,41 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 // 密钥只存内存：GUI 面板「设置 Key」或控制台 app.setLlmKey(...)。
                 llmEnabled: false,
                 llmEndpoint: 'https://opencode.ai/zen/go/v1/chat/completions',
-                llmModel: 'deepseek-flash',
+                // F53（V3.7）：默认模型改为当前 key 实测可用者。
+                // 真机教训：deepseek 家族（deepseek-flash / deepseek-v4-flash / deepseek-v4.1-flash）在本 key 上
+                // 被地区门禁挡住，返回 HTTP 403 RegionError：
+                //   "The latest version of this model is only available hosted in China and requires explicit opt in"
+                // 结果每次答题第 1 题就失败 → 只暂存不提交 → 停机等人工，整条自动答题链路形同停摆。
+                // 用户 2026-09-16 指定：**只用 deepseek 的 flash 模型、不切换模型**。
+                // 实测（同题同参数打网关）：`deepseek-flash` → finish=length 且 content 为空（配额全耗在 reasoning），
+                // 产不出答案；`deepseek-v4-flash` → 正常返回 {"answer":"B"}。故取后者（如需改回，改这一个字符串即可）。
+                // 原先主模型 minimax-m3 + 5 个降级模型（地区门禁/限流时自动切换）。现在降级链为空、开关关掉，
+                // 失败就走「60 秒心跳重试（最多 3 次）」→ 仍失败才安全兜底（只暂存不提交、停机等人工）。
+                llmModel: 'deepseek-v4-flash',
+                // F53：主模型不可用（地区门禁 / 无权限 / 限流 / 5xx / 空响应 / 网络超时）时按序自动降级；
+                // 停在第一个可用模型并在本会话内粘性复用，全部失败才回退原有安全策略（上锁 + 只暂存不提交）。
+                llmModelFallbacks: [],
+                llmModelFallbackOn: false,
                 // 实测：推理模型在 max_tokens 过小时会把配额耗在 reasoning 上导致 content 为空，必须 >= 1024。
-                llmMaxTokens: 4096, // 实测：推理 token 可达 1600+，1024 会把配额吃光导致空响应（finish_reason=length）
+                // 用户 2026-09-16 指定给足到 2048（推理段常 2000+ 字符，2048 足够留出正文配额）。
+                llmMaxTokens: 2048,
                 // true=请求体带 response_format:{"type":"json_object"}，约束模型只输出 JSON；自定义端点不支持时设为 false。
                 llmJsonMode: true,
                 llmTimeoutMs: 30000,
+                // 心跳重试（用户 2026-09-16 要求）：模型链全部失败后（典型场景=答题时 AI 接口断联），
+                // 等 llmRetryIntervalMs 再重试整条链，最多 llmRetryIntervalMs 次；仍失败才走安全兜底
+                // （只存草稿不提交、停止自动前进）。断网/网关抖动恢复后无需人工干预即可继续答题。
+                llmRetryIntervalMs: 60000,
+                llmMaxRetries: 5,
+                // 用户 2026-09-16 追加规则：心跳重试耗尽后**不提交**、直接**跳过该任务点**继续（false 则退回"停下等人"）。
+                llmSkipNodeAfterRetries: true,
+                // 用户 2026-09-17：识别「不计任务点」的调查问卷（平台不标任务点，原先被静默跳过）。
+                // 本开关只控制"识别 + 播报 + 记录"，不自动作答；自动作答需另加开关与策略。
+                surveyDetect: true,
+                // 用户 2026-09-17：识别到问卷后**用 LLM 自动作答并提交**（问卷无标准答案，选最合理正向项；填空题给固定正向短句）。
+                // 安全阀：每题必须都有作答才提交；提交按钮严格限定在 work iframe 内且文本精确匹配（避免误点页面其它按钮）。
+                surveyAutoFill: true,
+                surveySubmit: true,
                 // F33（V3.6 补丁）：LLM 请求最小间隔 + 抖动（防 429 / 防风控，对齐上游 RateLimiter）。
                 llmMinIntervalMs: 800,
                 // F33：直播任务点识别开关（识别到直播节点时安全停止并给出针对性提示，绝不当作未知节点跳过）。
@@ -192,6 +229,10 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 llmEmbeddedWork: false,
                 // 提交后任务点标记可能延迟（待批阅），窗口放宽到 90s（真机演练实证）。
                 llmWorkWaitMs: 90000,
+                // F48（V3.6）：不确定时"只暂存不提交"——作答链任何失败/上锁（题目校验未通过、选项匹配失败、
+                // 未全部作答）都先调用平台原生「暂时保存」(noSubmit) 存草稿，再停止等人工确认。
+                // 目的：既不在信息不足时把错误答案提交入库，也不让已填内容白丢。
+                workDraftOnUncertain: true,
             },
             _videoEl: null,
             _treeContainerEl: null,
@@ -232,6 +273,9 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             _llmTransport: null,
             _llmInFlight: false,
             _llmAbort: null,
+            // F53（V3.7）：模型降级链状态 —— _llmModelIndex 指向本会话已确认可用的模型（粘性复用）。
+            _llmModelIndex: 0,
+            _llmNoJsonMode: false,
             _llmAnswersThisSession: 0,
             _llmLastAnswer: null,
             _llmLastQuestionKey: '',
@@ -241,6 +285,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             _llmChapterSuggestedCount: 0,
             _workBusy: false,
             _docTaskBusy: false,
+            _discussTaskBusy: false,
             // 思路移植自 PR #48 @CsuCook1e：小节内视频任务点与任务点弹窗状态
             _currentVideoTaskIndex: 0,
             _videoTaskCount: 0,
@@ -286,7 +331,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._seekBackTimesThisUnit = 0;
                 this._seekBackCapLogged = false;
                 this._llmChapterSuggesting = false;
-                this._llmChapterSuggestDone = false;
+                this._llmChapterSuggestDone = false;this._llmChapterSuggestDone = false;
+                this._llmChapterSuggestDone = false;this._surveyHandledForThisUnit = false;   // 每进一个节点重置：保证每份问卷都会被识别并自动作答
                 if (this._guardProbeTimer) {
                     this._cancelTimer(this._guardProbeTimer);
                     this._guardProbeTimer = null;
@@ -320,6 +366,9 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     console.warn('%c检测到视频互动答题弹窗，已暂停自动跳转（#29 #39）。请手动完成题目，脚本会在弹窗消失后自动继续。', 'color:#FF9800');
                     return;
                 }
+                // F46（V3.6）：本节点有多个任务点（平台任务点标签页 #prev_tab）且当前显示的那个已完成时，
+                // 先切到还没核验的任务点标签再跳转，否则后续任务点（如「章节测验」）会被整体漏掉。
+                if (this._handleTaskTabs()) return;
                 // F11（V3.6）：当前小节还有未完成的内嵌章节测验/作业时，先把作业处理完再跳转（修复「视频+作业」双任务点组合被跳过）。
                 if (this._hasUnfinishedEmbeddedWork()) {
                     console.log('%c当前小节还有未完成的内嵌章节测验/作业，先处理作业再跳转', 'color:#FF9800');
@@ -330,6 +379,12 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 if (this._hasUnfinishedDocTask()) {
                     console.log('%c当前小节还有未完成的文档任务点（PDF/PPT），先翻阅再跳转', 'color:#FF9800');
                     this._handleDocTasks();
+                    return;
+                }
+                // F45（V3.6）：当前小节还有未完成的讨论任务点（insertbbs/BBS）时，先自动参与讨论再跳转。
+                if (this._hasUnfinishedDiscussTask()) {
+                    console.log('%c当前小节还有未完成的讨论任务点（BBS），先参与讨论再跳转', 'color:#FF9800');
+                    this._handleDiscussTasks();
                     return;
                 }
                 // t6：进入 nextUnit 前先取消任何待执行的「视频结束自动跳转」，避免旧定时器把刚打开的小节又跳一次。
@@ -826,6 +881,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             }
                             throw new Error('视频组件尚未加载完成');
                         }
+                        // F46（V3.6）：多任务点节点先切到未核验的任务点标签（见 _handleTaskTabs 注释）
+                        if (this._handleTaskTabs()) return;
                         // F11（V3.6）：未完成的内嵌章节测验/作业优先处理，绝不跳过
                         // （修复真机演练发现的「autoAdvanceNoVideo 把章节检验当未知节点跳过」问题）。
                         if (this._hasUnfinishedEmbeddedWork()) {
@@ -837,11 +894,16 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             this._handleDocTasks();
                             return;
                         }
+                        // F45（V3.6）：未完成的讨论任务点（BBS）自动参与，绝不当作未知节点跳过。
+                        if (this._hasUnfinishedDiscussTask()) {
+                            this._handleDiscussTasks();
+                            return;
+                        }
                         if (this._advanceLearningStep()) {
                             console.log('%c当前不在视频页，已尝试切到下一学习步骤，2秒后重试', 'color:#607D8B');
                             this._schedule(() => {
                                 this.play();
-                            }, 2000);
+                            }, 600);
                             return;
                         }
                         if (this._isChapterTest()) {
@@ -901,6 +963,86 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     }, this.configs.retryInterval);
                 }
             },
+            // ================= F46（V3.6）：节点内多任务点（平台任务点标签页）遍历 =================
+            // 逆向依据见 patch-f46 头部注释：changeDisplayContent 只把「当前标签对应的任务点」渲染进 #iframe。
+            _taskTabs() {
+                const out = [];
+                try {
+                    const lis = Array.from(document.querySelectorAll('#prev_tab li, .prev_ul li'));
+                    for (const li of lis) {
+                        const onclick = String(li.getAttribute('onclick') || '');
+                        const m = /changeDisplayContent\(\s*(\d+)\s*,\s*(\d+)/.exec(onclick);
+                        if (!m) continue;
+                        out.push({
+                            index: Number(m[1]),
+                            total: Number(m[2]),
+                            title: String(li.getAttribute('title') || li.textContent || '').replace(/\s+/g, '').slice(0, 16),
+                            active: /(^|\s)active(\s|$)/.test(String(li.className || '')),
+                            id: li.id || '',
+                        });
+                    }
+                } catch (e) { /* ignore */ }
+                return out;
+            },
+            _nodeUnfinishCount() {
+                // 平台在章节树里维护的「本节点未完成任务点数」：比 DOM 推断权威，且能覆盖"未显示的任务点"。
+                try {
+                    const el = document.querySelector('.posCatalog_active input.jobUnfinishCount')
+                        || document.querySelector('#coursetree input.jobUnfinishCount');
+                    if (el && el.value !== '' && el.value !== undefined && el.value !== null) return Number(el.value);
+                } catch (e) { /* ignore */ }
+                return null;
+            },
+            _activeTabUnfinished() {
+                // 当前显示的任务点是否还没做完（图标级证据 / 题面 / 文档 / 讨论）
+                try {
+                    const icons = Array.from(document.querySelectorAll('.ans-job-icon'));
+                    const hasUnfinishedIcon = icons.some((el) => {
+                        let h = null;
+                        try { h = el.closest ? el.closest('.ans-attach-ct') : null; } catch (e) { h = null; }
+                        return !(h && h.classList.contains('ans-job-finished'));
+                    });
+                    if (hasUnfinishedIcon) return true;
+                    if (typeof this._hasUnfinishedEmbeddedWork === 'function' && this._hasUnfinishedEmbeddedWork()) return true;
+                    if (typeof this._hasUnfinishedDocTask === 'function' && this._hasUnfinishedDocTask()) return true;
+                    if (typeof this._hasUnfinishedDiscussTask === 'function' && this._hasUnfinishedDiscussTask()) return true;
+                    if (document.querySelector('.TiMu, #Zy_TItle, .questionLi, .examTitle')) return true;
+                } catch (e) { /* ignore */ }
+                return false;
+            },
+            _handleTaskTabs() {
+                const tabs = this._taskTabs();
+                if (tabs.length <= 1) return false;                       // 单任务点节点：走原逻辑
+                const total = tabs[0] ? tabs[0].total : tabs.length;
+                const nodeKey = String(this._currentStepTitle() || '') + '#' + total;
+                if (this._taskTabNodeKey !== nodeKey) {
+                    this._taskTabNodeKey = nodeKey;
+                    this._taskTabChecked = {};
+                }
+                const platformLeft = this._nodeUnfinishCount();
+                if (platformLeft === 0) return false;                     // 平台说本节点任务点都完成了
+                if (this._activeTabUnfinished()) return false;            // 当前显示的任务点还没做完 → 交给既有处理器
+                for (const t of tabs) {
+                    if (t.active) continue;
+                    if (this._taskTabChecked[t.index]) continue;
+                    this._taskTabChecked[t.index] = true;
+                    console.log('%c[任务点标签] 切换任务点 ' + t.index + '/' + total + '（' + t.title + '）——多任务点节点必须逐个进入，否则会被漏掉', 'color:#2196F3');
+                    try {
+                        const li = t.id ? document.getElementById(t.id) : null;
+                        if (li) li.click();
+                        else {
+                            const f = Array.from(document.querySelectorAll('#prev_tab li')).find((x) => String(x.getAttribute('title') || '') === t.title);
+                            if (f) f.click();
+                        }
+                    } catch (e) { console.warn('%c[任务点标签] 切换失败：' + e.message, 'color:#FF9800'); }
+                    // F46b（真机修正）：切完标签必须**主动重新调度主循环**。
+                    // 既有钩子（作业/文档/讨论）都由各自处理器负责后续调度，这里只是"切了个标签"；
+                    // 漏掉这一步会导致"切过去就静止"（真机：stalled 一路涨、无任何作答日志）。
+                    this._schedule(() => this.play(), 2500);
+                    return true;                                          // 已切换 → 稍后重新评估新内容
+                }
+                return false;
+            },
             // F20（V3.6）：任务点图标级校验 —— 遍历所有同源文档，统计「未完成任务点」数量。
             // 判定依据与平台一致：.ans-job-icon / iframe[jobid] 的父容器带有 ans-job-finished 即已完成。
             // 真机背景：课件/PPT 节点做完后仍报「无法识别完成状态」，需要图标级证据支撑自动推进。
@@ -947,7 +1089,9 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     }
                 };
                 visit(typeof document === 'undefined' ? null : document, 0);
-                return { total: total, unfinished: unfinished };
+                // F46：附带平台在章节树里维护的「本节点未完成数」——能覆盖"任务点标签页未显示、图标不在 DOM"的情况
+                const platformUnfinished = this._nodeUnfinishCount();
+                return { total: total, unfinished: unfinished, platformUnfinished: platformUnfinished };
             },
             _isLiveNode() {
                 // F33（V3.6 补丁）：直播任务点识别 —— 直播节点此前会落入无视频流程被当未知节点处理。
@@ -1043,6 +1187,18 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 return state.emptyPlaceholder && !state.videoEvidence;
             },
             _handleNoVideoNode() {
+                // 用户 2026-09-17：问卷识别**不依赖任务点标记** —— 进入节点先看一眼内容区是不是问卷。
+                // （平台把问卷放进章节树但不标任务点，只靠"无任务点"分支兜是补漏，节点入口才是主判据。）
+                try {
+                    if (this.configs.surveyDetect !== false && this.configs.surveyAutoFill !== false && this._llmApiKey && !this._surveyHandledForThisUnit) {
+                        const sv = this._detectSurveyInFrames();
+                        if (sv) {
+                            this._surveyHandledForThisUnit = true;
+                            console.log('%c[问卷] 节点入口识别到问卷（' + sv.questions + ' 个控件 / ' + sv.groups + ' 个题组）→ LLM 自动作答', 'color:#2196F3');
+                            try { this._handleSurveyNode(sv); return; } catch (e) { console.error('[问卷] 入口处理异常:', e); }
+                        }
+                    }
+                } catch (e) { /* 识别失败不改变既有行为 */ }
                 // F3（#38 #42 #43 #50）：无视频/课件页不再默认卡死，但也不能盲目乱跳：
                 //   1) 只有「能识别出该节点已完成/无任务点」时才自动前进；
                 //   2) 识别不出来时保持安全停止，并打印可操作提示；
@@ -1079,6 +1235,24 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         return;
                     }
                     this._consecutiveNoVideoAdvances++;
+                    // 用户 2026-09-17：问卷小节在平台侧**不计任务点**，会被这里当"无任务点"静默跳过。
+                    // 本版只做「识别 + 明确播报」+ 记录，不自动作答（自动作答需另开开关，另行实现）。
+                    if (this.configs.surveyDetect !== false) {
+                        try {
+                            const survey = this._detectSurveyInFrames();
+                            if (survey) {
+                                this._lastSurvey = survey;
+                                if (this.configs.surveyAutoFill !== false && this._llmApiKey) {
+                                    console.warn('%c[问卷] 识别到「无任务点」调查问卷 → 交给 LLM 自动作答（' + (survey.title || '') + '）', 'color:#2196F3');
+                                    try { this._handleSurveyNode(survey); } catch (e) { console.error('[问卷] 自动作答异常:', e); this.nextUnit(); }
+                                    return;
+                                }
+                                console.warn('%c[问卷] 识别到「无任务点」的调查问卷：' + survey.title
+                                    + '（workId=' + (survey.workId || '未知') + '，题组 ' + survey.groups + ' 个，题干数 ' + survey.questions + '）'
+                                    + ' → 本版只识别不自动作答，按无任务点跳过', 'color:#FF9800');
+                            }
+                        } catch (e) { /* 识别失败不影响既有行为 */ }
+                    }
                     console.warn(`%c当前小节已识别为「已完成/无任务点」（依据：${verdict.signals.join('、')}），自动前进 ${this._consecutiveNoVideoAdvances}/${this.configs.maxConsecutiveNoVideoAdvances}（#38 #43）`, 'color:#FF9800');
                     this.nextUnit();
                     return;
@@ -1160,8 +1334,121 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 return completeTexts.some((value) => normalized.indexOf(value) >= 0)
                     && !incompleteTexts.some((value) => normalized.indexOf(value) >= 0);
             },
-            _isCompleteTaskClass(value) {
-                // 思路移植自 PR #48 @CsuCook1e（_isCompleteTaskClass）：覆盖 ans-job-finished 这类真实任务点类名。
+            _detectSurveyInFrames() {
+                // 逆向结论（2026-09-17 真机 198）：问卷在 iframe[src*="/mooc-ans/api/work"] 内，
+                // 题组按 name="answer<题目ID>" 分组（radio 单选 / checkbox 多选 / textarea 填空）；
+                // 平台**不把问卷标成任务点**，所以它会被"无任务点"流程静默跳过 —— 本方法负责把它认出来。
+                const seen = new Set();
+                const out = { title: '', workId: '', groups: 0, questions: 0, docs: [] };
+                const walk = (doc, depth) => {
+                    if (!doc || depth > 3 || seen.has(doc)) return;
+                    seen.add(doc);
+                    try {
+                        const wm = String((doc.location && doc.location.href) || '').match(/workId=(\d+)/);
+                        if (wm && !out.workId) out.workId = wm[1];
+                        const t = doc.body ? String(doc.body.textContent || '') : '';
+                        const tm = t.match(/[^\n]{0,20}问卷[^\n]{0,30}/);
+                        if (tm && !out.title) out.title = tm[0].replace(/\s+/g, ' ').trim().slice(0, 60);
+                    } catch (e) { /* 跨域文档读不到正文，跳过 */ }
+                    let frames = [];
+                    try { frames = Array.prototype.slice.call(doc.querySelectorAll('iframe')); } catch (e) { frames = []; }
+                    for (const f of frames) {
+                        let d = null;
+                        try { d = f.contentDocument || (f.contentWindow && f.contentWindow.document); } catch (e) { d = null; }
+                        if (!d) continue;
+                        const src = String(f.getAttribute('src') || '');
+                        let names = [];
+                        try {
+                            names = Array.prototype.slice.call(d.querySelectorAll('input[type=radio],input[type=checkbox],textarea'))
+                                .map((e) => String(e.name || '')).filter((n) => /^answer/.test(n));
+                        } catch (e) { names = []; }
+                        if (names.length) {
+                            let uniq = 0; const set = new Set();
+                            names.forEach((n) => { if (!set.has(n)) { set.add(n); uniq++; } });
+                            out.groups += uniq;
+                            out.questions += names.length;
+                            out.docs.push(d);
+                        }
+                        walk(d, depth + 1);
+                    }
+                };
+                walk(document, 0);
+                return out.groups > 0
+                    ? { title: out.title || '（未取到标题）', workId: out.workId, groups: out.groups, questions: out.questions, docs: out.docs }
+                    : null;
+            },
+            async _handleSurveyNode(survey) {
+                // 问卷作答闭环：逐题问 LLM（复用 _llmAskChoice）→ 填答 → 全答满才提交 → 收尾推进下一节点
+                const cfg = this.configs;
+                const doc = (survey && survey.docs && survey.docs[0]) || null;
+                const finishAdvance = () => { try { this.nextUnit(); } catch (e) { console.error('[问卷] 推进失败:', e); } };
+                if (!doc) { finishAdvance(); return false; }
+                const groups = {};
+                try {
+                    Array.prototype.slice.call(doc.querySelectorAll('input[type=radio],input[type=checkbox],textarea'))
+                        .filter((e) => /^answer/.test(String(e.name || '')))
+                        .forEach((e) => { const n = e.name; (groups[n] = groups[n] || []).push(e); });
+                } catch (e) { finishAdvance(); return false; }
+                const names = Object.keys(groups);
+                if (!names.length) { finishAdvance(); return false; }
+                console.log('%c[问卷] 开始作答 ' + names.length + ' 题（workId=' + (survey.workId || '?') + '）', 'color:#2196F3');
+                let answered = 0;
+                for (let i = 0; i < names.length; i++) {
+                    const els = groups[names[i]];
+                    const isText = String(els[0].tagName || '').toLowerCase() === 'textarea';
+                    const isMulti = String(els[0].type || '') === 'checkbox';
+                    if (els.some((e) => (isText ? String(e.value || '').trim() : e.checked))) { answered++; continue; }
+                    if (isText) {
+                        try {
+                            els[0].value = '课程内容清晰，收获较多';
+                            els[0].dispatchEvent(new Event('input', { bubbles: true }));
+                            els[0].dispatchEvent(new Event('change', { bubbles: true }));
+                            answered++;
+                        } catch (e) { }
+                        continue;
+                    }
+                    const opts = els.map((e) => {
+                        const label = (e.closest && e.closest('label')) || (e.id && doc.querySelector('label[for="' + e.id + '"]')) || (e.closest && e.closest('li')) || e.parentElement;
+                        return { el: e, letter: String(e.value || ''), text: String((label && label.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 60) };
+                    });
+                    const picked = await new Promise((resolve) => {
+                        let done = false;
+                        const to = this._schedule(() => { if (!done) { done = true; resolve(null); } }, Math.max(15000, Number(cfg.llmTimeoutMs) || 30000));
+                        try {
+                            this._llmAskChoice('（课程满意度问卷，没有标准答案，请选最合理、正向的一项；多选选 1-2 项）' + String(survey.title || ''), opts, isMulti, (err, result) => {
+                                if (done) return; done = true; try { this._cancelTimer(to); } catch (e) { }
+                                resolve(err ? null : result);
+                            });
+                        } catch (e) { if (!done) { done = true; resolve(null); } }
+                    });
+                    let chosen = (picked && Array.isArray(picked.picked)) ? picked.picked.slice(0, 2) : [];
+                    if (!chosen.length) chosen = [opts[0]];   // 兜底：问卷无标准答案，选第一项，保证"答满可提交"
+                    chosen.forEach((o) => {
+                        try {
+                            o.el.click();
+                            if (!o.el.checked) { o.el.checked = true; o.el.dispatchEvent(new Event('change', { bubbles: true })); o.el.dispatchEvent(new Event('input', { bubbles: true })); }
+                        } catch (e) { }
+                    });
+                    if (els.some((e) => e.checked)) answered++;
+                    await new Promise((r) => this._schedule(r, 350));
+                }
+                if (answered < names.length) {
+                    console.warn('%c[问卷] 仅作答 ' + answered + '/' + names.length + '，按安全策略**不提交**，跳过该节点', 'color:#FF9800');
+                    finishAdvance(); return false;
+                }
+                if (cfg.surveySubmit === false) { console.log('%c[问卷] 已答满 ' + names.length + ' 题，但 surveySubmit=false → 不提交', 'color:#FF9800'); finishAdvance(); return true; }
+                let clicked = false;
+                try {
+                    const btns = Array.prototype.slice.call(doc.querySelectorAll('a,button,input[type=submit],div[class*=btn],span[class*=btn]'))
+                        .filter((e) => /^(提交|交卷|完成)$/.test(String((e.textContent || e.value || '')).replace(/\s+/g, '').trim()));
+                    if (btns.length) { btns[0].click(); clicked = true; }
+                } catch (e) { }
+                console.log('%c[问卷] ' + (clicked ? '已提交（' + names.length + ' 题全部作答）' : '已答满但未找到提交按钮（仅填答）'), clicked ? 'color:#4CAF50' : 'color:#FF9800');
+                await new Promise((r) => this._schedule(r, 1200));
+                finishAdvance();
+                return clicked;
+            },
+            _isCompleteTaskClass(value) {                // 思路移植自 PR #48 @CsuCook1e（_isCompleteTaskClass）：覆盖 ans-job-finished 这类真实任务点类名。
                 const className = String(value || '').toLowerCase();
                 return /(ans-)?job-?(finished|finish|done|complete|completed)|finished|complete|completed|done/.test(className)
                     && !/(unfinished|incomplete|uncomplete|doing|todo|wait|waiting)/.test(className);
@@ -1790,7 +2077,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._laneLastKeeperTs = 0;
                 this._currentVideoTaskIndex = 0;
                 this._llmChapterSuggesting = false;
-                this._llmChapterSuggestDone = false;
+                this._llmChapterSuggestDone = false;this._llmChapterSuggestDone = false;
+                this._llmChapterSuggestDone = false;this._surveyHandledForThisUnit = false;   // 每进一个节点重置：保证每份问卷都会被识别并自动作答
                 this._videoTaskCount = 0;
                 this._videoTaskAllComplete = false;
                 this._handlingVideoEnd = false;
@@ -2153,6 +2441,13 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     '.Zy_TItle',
                     '[class*="answerQuestion"]',
                     '[class*="videoInteraction"]',
+                    // F51（真机抓取）：学习通"视频内嵌题目"的真实结构 —— 此前一个都没覆盖，
+                    // 导致题目挡住的暂停被当成"非用户操作暂停"，脚本停在原地干等。
+                    '.ans-videoquiz',
+                    '.ans-timelineobjects',
+                    '[class*="ans-videoquiz"]',
+                    '.ans-videoquiz-opt',
+                    '#videoquiz-submit',
                 ].join(', ');
                 let candidates = [];
                 try {
@@ -2160,7 +2455,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 } catch (e) {
                     candidates = [];
                 }
-                const promptRe = /(请选择|请回答|请作答|选择你认为|判断题|单选题|多选题|请你判断)/;
+                // F51：promptRe 增加"共 N 题，已答对 M 题"这一内嵌题目专有文案（真机原文）
+                const promptRe = /(请选择|请回答|请作答|选择你认为|判断题|单选题|多选题|请你判断|已答对|共\s*\d+\s*题)/;
                 for (const candidate of candidates) {
                     if (!this._isVisible(candidate)) continue;
                     let scope = candidate;
@@ -2690,7 +2986,130 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 }
                 return this._llmRequestNow(payload, onDone, onFail);
             },
+            _llmModelChain() {
+                // F53：主模型 + 降级模型列表（去重、去空、保序）。
+                const out = [];
+                const push = (m) => {
+                    const s = String(m == null ? '' : m).trim();
+                    if (!s || out.indexOf(s) >= 0) return;
+                    out.push(s);
+                };
+                push(this.configs.llmModel);
+                const list = this.configs.llmModelFallbacks;
+                if (Array.isArray(list)) list.forEach(push);
+                return out;
+            },
+            _llmClassifyModelError(err) {
+                // F53：判断失败原因是否需要"换模型"或"去掉 response_format 重试"。
+                const msg = String((err && err.message) || err || '');
+                const m = /HTTP\s+(\d{3})/.exec(msg);
+                const status = m ? Number(m[1]) : 0;
+                if (status === 400) return { code: 'HTTP 400（请求参数被拒）', nextModel: true, tryNoJsonMode: true };
+                if (status === 401 || status === 403) {
+                    const region = /RegionError/.test(msg) ? ' RegionError（地区门禁）' : '（无权限/鉴权失败）';
+                    return { code: 'HTTP ' + status + region, nextModel: true };
+                }
+                if (status === 404 || status === 422) return { code: 'HTTP ' + status + '（模型不存在/不可用）', nextModel: true };
+                if (status === 429) return { code: 'HTTP 429（限流）', nextModel: true };
+                if (status >= 500) return { code: 'HTTP ' + status + '（网关错误）', nextModel: true };
+                if (status) return { code: 'HTTP ' + status, nextModel: false };
+                if (/超时|网络错误|timeout|ETIMEDOUT|ECONNRESET/i.test(msg)) return { code: '网络/超时', nextModel: true };
+                if (/内容为空|token 耗尽/.test(msg)) return { code: '空响应', nextModel: true };
+                return { code: msg.slice(0, 60) || '未知错误', nextModel: false };
+            },
+            setLlmModels(primary, fallbacks) {
+                // F53：运行时切换模型（只存内存）。fallbacks 传数组则整体替换降级列表。
+                if (primary != null && String(primary).trim()) this.configs.llmModel = String(primary).trim();
+                if (Array.isArray(fallbacks)) {
+                    this.configs.llmModelFallbacks = fallbacks.map((x) => String(x == null ? '' : x).trim()).filter(Boolean);
+                }
+                this._llmModelIndex = 0;
+                this._llmNoJsonMode = false;
+                console.log('%c[LLM] 模型链已更新：' + this._llmModelChain().join(' → '), 'color:#2196F3');
+                return this._llmModelChain();
+            },
+            _llmRequestChain(payload, onDone, onFail) {
+                // F53：模型降级链 —— 依次尝试，停在第一个可用模型（本会话粘性复用），全部失败才回调失败。
+                const chain = this._llmModelChain();
+                if (this.configs.llmModelFallbackOn === false || chain.length <= 1) {
+                    this._llmInFlight = true;
+                    return this._llmAttempt(payload, onDone, onFail, false);
+                }
+                const startIdx = Math.max(0, Math.min(Number(this._llmModelIndex) || 0, chain.length - 1));
+                let idx = startIdx;
+                let noJsonMode = !!this._llmNoJsonMode;
+                let lastErr = null;
+                this._llmInFlight = true;
+                const step = () => {
+                    if (idx >= chain.length) {
+                        this._llmInFlight = false;
+                        onFail(lastErr || new Error('全部模型均不可用（' + chain.join(' → ') + '）'));
+                        return;
+                    }
+                    const model = chain[idx];
+                    const body = Object.assign({}, payload, { model: model });
+                    if (noJsonMode) delete body.response_format;
+                    this._llmAttempt(body, (content, meta) => {
+                        if (idx !== startIdx) {
+                            console.log('%c[LLM] 已切换模型：' + model + '（原 ' + chain[startIdx] + ' 不可用），本题起复用该模型', 'color:#4CAF50');
+                        }
+                        this._llmModelIndex = idx;
+                        this._llmNoJsonMode = noJsonMode;
+                        this._llmInFlight = false;
+                        onDone(content, meta);
+                    }, (err) => {
+                        lastErr = err || new Error('LLM 请求失败');
+                        const info = this._llmClassifyModelError(lastErr);
+                        if (info.tryNoJsonMode && !noJsonMode) {
+                            console.log('%c[LLM] 模型 ' + model + ' 判定 ' + info.code + ' → 去掉 response_format 重试一次', 'color:#FF9800');
+                            noJsonMode = true;
+                            this._schedule(step, 300);
+                            return;
+                        }
+                        if (!info.nextModel) {
+                            this._llmInFlight = false;
+                            onFail(lastErr);
+                            return;
+                        }
+                        const next = chain[idx + 1];
+                        console.log('%c[LLM] 模型 ' + model + ' 不可用（' + info.code + '）'
+                            + (next ? ' → 自动降级到 ' + next : ' → 已无更多备用模型'), 'color:#FF9800');
+                        idx++;
+                        if (idx < chain.length) {
+                            this._llmModelIndex = idx;
+                            noJsonMode = !!this._llmNoJsonMode;
+                            this._schedule(step, Math.max(300, Math.min(1500, Number(this.configs.llmMinIntervalMs) || 800)));
+                        } else {
+                            this._llmInFlight = false;
+                            onFail(lastErr);
+                        }
+                    }, true);
+                };
+                step();
+                return null;
+            },
             _llmRequestNow(payload, onDone, onFail) {
+                const cfg = this.configs;
+                // 60 秒心跳重试（最多 3 次）：整条模型链失败通常是"AI 接口断联"（网络/网关抖动），
+                // 等一会儿往往就通了；不重试就会卡在"无法匹配选项 → 只存草稿 → 停止前进"等人。
+                // 真机 2026-09-16：答题时 AI 断联即卡住，用户要求加此心跳重试。
+                const interval = Math.max(1000, Number(cfg.llmRetryIntervalMs) || 60000);
+                const maxRetries = Math.max(0, Number(cfg.llmMaxRetries == null ? 3 : cfg.llmMaxRetries));
+                let tries = 0;
+                const attempt = () => {
+                    this._llmRequestChain(payload, onDone, (err) => {
+                        tries++;
+                        if (tries > maxRetries) { onFail(err); return; }
+                        const reason = (err && err.message) ? err.message : String(err);
+                        console.log('%c[LLM] AI 接口断联（' + reason.slice(0, 120) + '）→ ' + Math.round(interval / 1000)
+                            + ' 秒后心跳重试（第 ' + tries + '/' + maxRetries + ' 次）', 'color:#FF9800');
+                        this._schedule(attempt, interval);
+                    });
+                };
+                attempt();
+                return null;
+            },
+            _llmAttempt(payload, onDone, onFail, keepInFlight) {
                 const cfg = this.configs;
                 const timeoutMs = Math.max(1000, Number(cfg.llmTimeoutMs) || 30000);
                 let timer = null;
@@ -2698,7 +3117,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const finish = (ok, a, b) => {
                     if (settled) return;
                     settled = true;
-                    this._llmInFlight = false;
+                    if (!keepInFlight) this._llmInFlight = false;
                     this._llmAbort = null;
                     if (timer) this._cancelTimer(timer);
                     try { if (ok) onDone(a, b); else onFail(a); } catch (e) { console.error('[LLM] 回调处理失败:', e); }
@@ -3010,8 +3429,43 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const picked = this._llmPickOptions(options, answer);
                 return picked.length ? picked[0] : null;
             },
+            _stripQuizChrome(text) {
+                // F56：剥掉「视频内嵌题容器」的噪声文案，只留题干与选项。
+                // 安全边界：**只有确认是内嵌题容器文本时才动手**（含「共 N 题」或「已答对 M 题」），
+                // 否则一律原样返回 —— 避免误伤题干里本来就含"提交/回看"等词的普通题目。
+                let t = String(text == null ? '' : text);
+                // F59：计数占位可能**没有数字**（真机变体：「，已答对 题 单选题…」「， 单选题…」），
+                // 因此守卫与剥离都用 \d* 而非 \d+ —— 否则两个变体剥不出同一串，去重键漂移，同一题会答两遍。
+                if (!/(共\s*\d*\s*题|已答对\s*\d*\s*题)/.test(t)) return t;
+                t = t.replace(/共\s*\d*\s*题/g, ' ').replace(/已答对\s*\d*\s*题/g, ' ');
+                t = t.replace(/提交中|提交|继续学习|知识点回看|查看解析|回看/g, ' ');
+                t = t.replace(/恭喜你[^。！!]*[。！!]?/g, ' ').replace(/真遗憾[^。！!]*[。！!]?/g, ' ');
+                t = t.replace(/你的答题水准超过了\s*\d+%\s*的同学/g, ' ').replace(/再接再厉|答对了/g, ' ');
+                // F56b：真实倒计时占位是无数字的「分钟」占位符（真机文本：…真遗憾，再接再厉！回看 分钟…），
+                // 因此写成 \d* 而非 \d+，否则会残留 " 分钟" 尾巴让去重键不稳定。
+                // F59 教训：这里**不能**再做"行首标点归一"之类的额外清理 —— 只有走剥离的那一版会被清理，
+                // 而不含噪声的那一版会原样返回，两边反而永不相等（F59 首版就是这么红的）。
+                // 不变量：只剥掉已识别的噪声文案，其余字符一字不改。
+                t = t.replace(/\d*\s*分钟/g, ' ').replace(/\s+/g, ' ').trim();
+                return t;
+            },
+            _quizProgress(text) {
+                // F56：从内嵌题容器文本读「共 N 题 / 已答对 M 题」。
+                const t = String(text == null ? '' : text);
+                const total = /共\s*(\d+)\s*题/.exec(t);
+                const correct = /已答对\s*(\d+)\s*题/.exec(t);
+                const totalN = total ? Number(total[1]) : 0;
+                const correctN = correct ? Number(correct[1]) : 0;
+                return {
+                    total: totalN,
+                    correct: correctN,
+                    allCorrect: totalN > 0 && correctN >= totalN,
+                };
+            },
             _llmQuestionKey(found) {
-                const t = String((found && (found.questionText || found.text)) || '');
+                // F56：去重键必须用「剥掉容器噪声」后的题干 —— 否则作答后计数从 0 变 1 就会让哈希变化，
+                // 同一题被当成新题重答一遍（真机：已答对 1 题后又答了一次，answers=2 却只有 1 道题）。
+                const t = this._stripQuizChrome(String((found && (found.questionText || found.text)) || ''));
                 if (!t) return '';
                 let hash = 0;
                 for (let i = 0; i < t.length; i++) hash = ((hash << 5) - hash + t.charCodeAt(i)) | 0;
@@ -3060,6 +3514,23 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 return true;
             },
             _answerInteractionWithLlm(found) {
+                const rawFull = String(found.questionText || found.text || '');
+                // F56：已全部答对就别再答一遍 —— 既省 LLM 调用，也避免对已答对的多选题再点一次把选项点掉。
+                const progress = this._quizProgress(rawFull);
+                if (progress.allCorrect) {
+                    // F57/F58：互动看门狗会以 ~1.5s 周期反复探测同一道"已答对"的题（真机修复前 10 秒 7 行）。
+                    // F57 先做了 15 秒限频（真机残留：间隔 15~17 秒仍持续冒行），F58 收紧为**按题目键只提示一次**
+                    // （记忆最近 50 个键）。**行为完全不变**：仍然每次都重新评估；若平台把该题重置为「已答对 0 题」，
+                    // _quizProgress 的 allCorrect 变 false → 闸门不再命中 → 照常作答（F58-2 把这条前提钉成断言）。
+                    const logKey = this._llmQuestionKey(found);
+                    const seen = this._quizAllCorrectKeys || (this._quizAllCorrectKeys = []);
+                    if (logKey && seen.indexOf(logKey) < 0) {
+                        if (seen.length >= 50) seen.shift();
+                        seen.push(logKey);
+                        console.log('%c[LLM] 互动题已全部答对（' + progress.correct + '/' + progress.total + '），跳过重复作答', 'color:#4CAF50');
+                    }
+                    return;
+                }
                 const questionKey = this._llmQuestionKey(found);
                 if (questionKey && questionKey === this._llmLastQuestionKey) return;
                 this._llmLastQuestionKey = questionKey;
@@ -3068,19 +3539,35 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     text: opt.text,
                     el: opt.el,
                 }));
-                const question = String(found.questionText || found.text || '').slice(0, 500);
-                console.log('%c[LLM] 检测到互动题，正在请求大模型作答（结果会显示在本面板）…', 'color:#2196F3');
-                this._guiRefreshStatus(true);
-                const isMulti = /多选/.test(question)
-                    || options.some((o) => { try { return !!(o.el && o.el.querySelector && o.el.querySelector('input[type=checkbox]')); } catch (e) { return false; } });
-                this._llmAskChoice(question, options, isMulti, (err, result) => {
-                    if (err || !result || !result.picked.length) {
-                        console.warn('%c[LLM] 互动题作答失败，回退为人工处理：' + (err ? err.message : '无法匹配选项'), 'color:#FF9800');
+                const rawQuestion = (this._stripQuizChrome(rawFull) || rawFull).slice(0, 500);
+                // F52：互动题（视频内嵌题）的题干与选项也可能被 font-cxsecret 混淆，先解密再审题；
+                // 若仍有"有字形却未解出"的混淆字，判为不确定 → 不自动作答，回退人工（与 F48/F49 同一策略）。
+                this._cxSecretDecode([rawQuestion].concat(options.map((o) => o.text)), (decoded) => {
+                    const question = String(decoded[0] || rawQuestion);
+                    const opts = options.map((o, i) => ({ letter: o.letter, el: o.el, text: String(decoded[i + 1] || o.text) }));
+                    console.log('%c[LLM] 检测到互动题，题干(已解码)：' + question.slice(0, 160), 'color:#607D8B');
+                    if (opts.length) {
+                        console.log('%c[LLM] 互动题选项(已解码)：' + opts.map((o) => o.letter + ':' + String(o.text).slice(0, 24)).join(' | '), 'color:#607D8B');
+                    }
+                    const unresolved = this._cxLastUnresolved || [];
+                    if (unresolved.length) {
+                        console.warn('%c[LLM] 互动题题干仍有 ' + unresolved.length + ' 个未解出的混淆字（' + unresolved.slice(0, 10).join('') + '），判为不确定 → 不自动作答，回退人工', 'color:#FF9800');
                         this._llmLastQuestionKey = '';
                         if (!this._interactionBlocked) this._blockInteractionForManual(found);
                         return;
                     }
-                    this._applyInteractionAnswer(found, options, result);
+                    this._guiRefreshStatus(true);
+                    const isMulti = /多选/.test(question)
+                        || opts.some((o) => { try { return !!(o.el && o.el.querySelector && o.el.querySelector('input[type=checkbox]')); } catch (e) { return false; } });
+                    this._llmAskChoice(question, opts, isMulti, (err, result) => {
+                        if (err || !result || !result.picked.length) {
+                            console.warn('%c[LLM] 互动题作答失败，回退为人工处理：' + (err ? err.message : '无法匹配选项'), 'color:#FF9800');
+                            this._llmLastQuestionKey = '';
+                            if (!this._interactionBlocked) this._blockInteractionForManual(found);
+                            return;
+                        }
+                        this._applyInteractionAnswer(found, opts, result);
+                    });
                 });
             },
             _applyInteractionAnswer(found, options, result) {
@@ -3095,15 +3582,13 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 }
                 this._llmAnswersThisSession++;
                 this._llmLastAnswer = { q: String(found.text || '').slice(0, 40), a: answer.slice(0, 20) };
-                this._clickWithVerification(picked, (clickErr) => {
-                    if (clickErr) console.warn('%c[LLM] 互动题选项点击未生效：' + clickErr.message, 'color:#FF9800');
-                });
-                console.log('%c[LLM] 已选择答案 ' + answer + '（' + picked.map((c) => String(c.text || '').slice(0, 20)).join(' / ') + '）', 'color:#9C27B0');
                 this._answerCacheSet(String(found.questionText || found.text || ''), 'choice', answer);
                 this._guiRefreshStatus(true);
+                // F42：提交按钮识别 + DOM 诊断 dump —— 与点击成败无关，先做（F55 回归修复：
+                // 此前这段被挪进点击回调，点击失败即提前 return，导致"未找到提交按钮"的诊断不再打印）。
                 const submitEl = this._findInteractionSubmit(found);
                 if (!submitEl) {
-                    console.warn('%c[LLM] 未找到提交/继续按钮：答案已选好，请手动提交（弹窗消失后脚本自动恢复）', 'color:#FF9800');
+                    console.warn('%c[LLM] 未找到提交/继续按钮：将先选中答案，请人工点击「提交/继续」（弹窗消失后脚本自动恢复）', 'color:#FF9800');
                     try {
                         // F42：诊断 dump —— 记录弹窗 DOM 与候选控件，便于下一次精准补按钮识别。
                         const scope = (found && found.el) || null;
@@ -3115,21 +3600,30 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         }
                         console.warn('%c[LLM] 弹窗诊断: ' + snap + ' ｜ 候选: ' + cands, 'color:#607D8B');
                     } catch (e) { /* ignore */ }
-                    return;
                 }
-                if (!this.configs.llmAutoSubmit) {
-                    console.log('%c[LLM] 半自动模式：答案已选好，请人工点击「提交/继续」；如需自动提交请开启 llmAutoSubmit', 'color:#607D8B');
-                    return;
-                }
-                const delay = 500 + Math.floor(Math.random() * 1000);
-                this._schedule(() => {
-                    try {
-                        submitEl.click();
-                        console.log('%c[LLM] 已自动点击提交/继续按钮', 'color:#9C27B0');
-                    } catch (e) {
-                        console.warn('%c[LLM] 提交按钮点击失败，请手动提交', 'color:#FF9800');
+                // F55-B：先确保选项真正选上，再决定提交；没选上就绝不提交（否则空答白白消耗作答机会 + 属于伪造完成）。
+                this._clickWithVerification(picked, (clickErr) => {
+                    if (clickErr) {
+                        console.warn('%c[LLM] 互动题选项点击未生效（' + clickErr.message + '）：已跳过提交，保留作答机会等下一轮重试', 'color:#FF9800');
+                        this._llmLastQuestionKey = '';   // 清掉去重键，允许下一轮对同一题重试
+                        return;
                     }
-                }, delay);
+                    console.log('%c[LLM] 已选择答案 ' + answer + '（' + picked.map((c) => String(c.text || '').slice(0, 20)).join(' / ') + '）', 'color:#9C27B0');
+                    if (!submitEl) return;   // 无提交按钮：诊断已打印、答案已选好，交人工提交
+                    if (!this.configs.llmAutoSubmit) {
+                        console.log('%c[LLM] 半自动模式：答案已选好，请人工点击「提交/继续」；如需自动提交请开启 llmAutoSubmit', 'color:#607D8B');
+                        return;
+                    }
+                    const delay = 500 + Math.floor(Math.random() * 1000);
+                    this._schedule(() => {
+                        try {
+                            submitEl.click();
+                            console.log('%c[LLM] 已自动点击提交/继续按钮', 'color:#9C27B0');
+                        } catch (e) {
+                            console.warn('%c[LLM] 提交按钮点击失败，请手动提交', 'color:#FF9800');
+                        }
+                    }, delay);
+                });
             },
             _findInteractionSubmit(found) {
                 // F39：放宽提交/继续按钮识别 —— 兼容 class 含 submit/btn 的 div/span 与「提交答案/继续播放」等文案。
@@ -3612,23 +4106,48 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 if (!fonts.length) return null;
                 const map = {};
                 let hit = 0;
+                const unresolved = [];
                 const list = Array.isArray(chars) ? chars : Array.from(String(chars || ''));
                 for (const ch of list) {
                     let real = null;
+                    let hasGlyph = false;
                     for (const font of fonts) {
                         const gid = font.cmap.get(ch.charCodeAt(0));
-                        const hash = (gid != null) ? this._cxGlyphHash(font, gid) : '';
-                        const found = hash ? table.get(hash) : null;
+                        if (gid == null) continue;                 // 该字不在混淆字体里 = 正常汉字，跳过
+                        const hash = this._cxGlyphHash(font, gid);
+                        if (!hash) continue;
+                        hasGlyph = true;                            // 确实用混淆字体渲染
+                        const found = table.get(hash);
                         if (found) { real = found; break; }
                     }
                     if (real && real !== ch) { map[ch] = this._cxApplyKxRadicals(real); hit++; }
+                    // F49：有字形却没解出来 = 真乱码信号（与"正常汉字未命中"严格区分）
+                    else if (hasGlyph) unresolved.push(ch);
                 }
-                return { map: map, hit: hit, total: list.length, font: fonts[0] };
+                return { map: map, hit: hit, total: list.length, unresolved: unresolved, font: fonts[0] };
             },
             _cxSecretFontsB64() {
+                // F54（V3.7）：累积式收集 —— 同时修两个相反方向的问题：
+                //   (1) 旧写法「if (this._cxFontsB64) return this._cxFontsB64;」是永久缓存：题目按组 AJAX 注入时
+                //       新出现的 font-cxsecret 字体子集再也收不进来，该组混淆字的 gid 查不到 → 被当"正常汉字"
+                //       原样保留（真机：2026-09-14T14-17-49 的 Q2「惵惫瑝參蠢惴惮」/Q3「惸烈的辩惫中需惴先亮瑆观点」）。
+                //   (2) 反过来也不能"每次重扫即覆盖"：实测 font-cxsecret 规则是瞬态的，切走题目组后 DOM 里
+                //       一条都不剩（tmp-verify/probe-font-stale.mjs：cachedFonts=1 / domFonts=0），覆盖会丢字体。
+                // 因此取并集：保留历史收集到的，追加本次新发现的，永不收缩。
+                const found = this._cxCollectFontsB64();
+                const prev = Array.isArray(this._cxFontsB64) ? this._cxFontsB64 : [];
+                const merged = prev.slice();
+                for (const b of found) if (merged.indexOf(b) < 0) merged.push(b);
+                if (merged.length !== prev.length) {
+                    console.log('%c[字库解密] font-cxsecret 字体累积：本次扫到 ' + found.length
+                        + ' 个，新增 ' + (merged.length - prev.length) + ' 个，合计 ' + merged.length + ' 个', 'color:#607D8B');
+                }
+                this._cxFontsB64 = merged;
+                return merged;
+            },
+            _cxCollectFontsB64() {
                 // F42（V3.6 补丁）：页面可能有多个 font-cxsecret 字体（不同题组不同子集）；
                 // 只取第一个会导致部分字解密失败/命中率低。这里全部收集并去重。
-                if (this._cxFontsB64) return this._cxFontsB64;
                 const out = [];
                 const seenDocs = new Set();
                 const visit = (doc, depth) => {
@@ -3656,7 +4175,6 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     } catch (e) { /* ignore */ }
                 };
                 visit(typeof document === 'undefined' ? null : document, 0);
-                this._cxFontsB64 = out;
                 return out;
             },
             _cxSecretFontB64() {
@@ -3665,6 +4183,7 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             },
             _cxSecretDecode(texts, cb) {
                 const list = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t == null ? '' : t));
+                this._cxLastUnresolved = [];   // F49：本次解密的"未解出混淆字"清单
                 const done = (out) => { try { cb(out); } catch (e) { console.error('[字库解密] 回调失败:', e); } };
                 if (!this.configs.cxSecretDecode) { done(list); return; }
                 const chars = [];
@@ -3682,7 +4201,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const fontList = this._cxSecretFontsB64();
                 const b64 = fontList[0] || '';
                 if (!b64) { console.warn('%c[字库解密] 未找到 font-cxsecret 字体，跳过解码', 'color:#FF9800'); finish(); return; }
-                const run = () => {
+                // F47：run 可指定"只解密这批字"（哈希命中后仅对未命中的字做位图回退）
+                const run = (charList) => {
                     try {
                         const R = 48, SIZE = 32;
                         const canvas = document.createElement('canvas');
@@ -3729,9 +4249,13 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             if (typeof window !== 'undefined') window.__xtCxCands = cands;
                         }
                         const matched = [];
-                        for (const ch of todo) {
+                        const unresolved = [];
+                        const queue = (charList && charList.length) ? charList : todo;
+                        for (const ch of queue) {
                             const tb = bmp(ch, 'xt_cxsecret');
-                            if (!tb) { cached[ch] = ch; continue; }
+                            // F47：渲染不出字形 = cxsecret 字体尚未就绪 → **绝不能**把 ch→ch 写进缓存
+                            // （旧实现会永久毒化 _cxSecretMap，导致这些字以后再也不尝试解密）
+                            if (!tb) { unresolved.push(ch); continue; }
                             let best = '', bs = Infinity;
                             for (const c of cands) {
                                 let d = 0;
@@ -3744,7 +4268,9 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             cached[ch] = best || ch;
                             matched.push(ch + '→' + cached[ch]);
                         }
-                        if (matched.length) console.log('%c[字库解密] 已还原 ' + matched.length + ' 个混淆字：' + matched.slice(0, 20).join(' '), 'color:#4CAF50');
+                        const real = matched.filter((m) => m.split('→')[0] !== m.split('→')[1]);
+                        if (matched.length) console.log('%c[字库解密] 位图匹配 ' + matched.length + ' 字（其中真实改写 ' + real.length + ' 字）：' + matched.slice(0, 20).join(' '), 'color:#4CAF50');
+                        if (unresolved.length) console.warn('%c[字库解密] ' + unresolved.length + ' 个字未能渲染字形（cxsecret 字体未就绪）→ 不写缓存，留待下次：' + unresolved.slice(0, 12).join(''), 'color:#FF9800');
                         finish();
                     } catch (e) { console.warn('%c[字库解密] 失败：' + (e && e.message ? e.message : e), 'color:#FF9800'); finish(); }
                 };
@@ -3752,22 +4278,56 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 if (String(this.configs.cxSecretFontMode || 'auto') !== 'bitmap' && this._cxFontHashMap()) {
                     const self = this;
                     this._cxFontDecodeChars(fontList, chars).then((res) => {
-                        if (res && res.hit > 0) {
-                            for (const k in res.map) { if (Object.prototype.hasOwnProperty.call(res.map, k)) cached[k] = res.map[k]; }
-                            console.log('%c[字库解密] glyf 哈希命中 ' + res.hit + '/' + res.total + ' 字（上游 Samueli924/chaoxing 算法）', 'color:#4CAF50');
-                            finish();
-                        } else {
-                            run();
+                        let hit = 0;
+                        if (res && res.map) {
+                            for (const k in res.map) {
+                                if (Object.prototype.hasOwnProperty.call(res.map, k)) { cached[k] = res.map[k]; hit++; }
+                            }
                         }
-                    }).catch(() => { run(); });
+                        if (hit > 0) console.log('%c[字库解密] glyf 哈希命中 ' + hit + '/' + (res.total || chars.length) + ' 字（上游 Samueli924/chaoxing 算法）', 'color:#4CAF50');
+                        this._cxLastUnresolved = (res && res.unresolved) || [];   // F49：供提交前置校验使用
+                        // F47e（严格对齐上游 cxsecret_font.py::decrypt）：
+                        //   上游只做一件事 —— 哈希命中即替换，未命中的字符**原样保留**（哈希表里只有
+                        //   "被混淆字→真字" 的映射，"判断题/作/种/高/动/对/错" 这类正常汉字本来就不在表里）。
+                        //   此处**不做任何位图兜底**：那既不是上游实现，又会在 FontFace 不 settle 时
+                        //   把整条作答链挂死（真机卡死根因，已回退）。
+                        finish();
+                        const rest = chars.filter((ch) => !(res && res.map && Object.prototype.hasOwnProperty.call(res.map, ch)));
+                        if (rest.length) {
+                            console.log('%c[字库解密] 未命中 ' + rest.length + ' 字（正常汉字，按上游行为原样保留）：' + rest.slice(0, 16).join(''), 'color:#607D8B');
+                        }
+                    }).catch(() => { finish(); });
                     return;
                 }
-                if (!this._cxFontLoaded && typeof FontFace !== 'undefined' && document.fonts) {
+                // F47：位图回退前必须确保 cxsecret 字体已加载（旧实现只在非哈希分支加载，
+                // 导致哈希分支回退时 bmp() 渲染不出字形）
+                // F47b：字体加载加超时兜底 —— FontFace.load() 在字体数据异常时可能既不 resolve 也不 reject
+                //（真机：回退路径静默悬挂，页面无日志但主线程空闲），超时也继续用位图匹配（画布会退回系统字体）。
+                const loadFontOnce = (next) => {
+                    if (this._cxFontLoaded || typeof FontFace === 'undefined' || !document.fonts) { next(''); return; }
+                    let settled = false;
+                    const go = (why) => {
+                        if (settled) return;
+                        settled = true;
+                        if (why) console.warn('%c[字库解密] cxsecret 字体加载' + why + '，仍继续位图匹配', 'color:#FF9800');
+                        next(why);
+                    };
+                    // F47c：硬兜底用**页面原生 setTimeout**，不用 app._schedule ——
+                    // 真机实测：app 的定时器注册表可能被运行中的流程清掉，导致这里的超时永不触发、
+                    // 整条回退路径静默悬挂（现象：cands=null、fontLoaded=false、无任何日志）。
+                    const timer = setTimeout(() => go('超时（3 秒）'), 3000);
+                    // 仍按项目定时器契约登记到 _timers：destroy() 时能被清理，
+                    // 且满足对抗套件 H1 的静态审计（setTimeout 调用点必须登记）
+                    try { if (!this._timers) this._timers = new Set(); this._timers.add(timer); } catch (e) { /* ignore */ }
                     try {
                         const ff = new FontFace('xt_cxsecret', 'url(data:font/ttf;base64,' + b64 + ')');
-                        ff.load().then(() => { document.fonts.add(ff); this._cxFontLoaded = true; run(); }).catch(() => { run(); });
-                    } catch (e) { run(); }
-                } else { run(); }
+                        ff.load()
+                            .then(() => { try { document.fonts.add(ff); } catch (e) { /* ignore */ } this._cxFontLoaded = true; clearTimeout(timer); go(''); })
+                            .catch((err) => { clearTimeout(timer); go('失败：' + ((err && err.message) || err)); });
+                    } catch (e) { clearTimeout(timer); go('异常：' + (e && e.message)); }
+                };
+                const runWithFont = (charList) => loadFontOnce(() => run(charList));
+                runWithFont(todo);
             },
             _workQuestionList(quizDoc) {
                 const win = quizDoc.defaultView;
@@ -3794,7 +4354,11 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             // 真机教训：把编辑器外壳当选项点击 → 提交空值。
                             try { if (li.querySelector('.edui-editor, textarea, iframe, [class*="edui"]')) return false; } catch (e) { /* ignore */ }
                             const t = (li.textContent || '').replace(/\s+/g, ' ').trim();
-                            if (!t || t.length > 200) return false;
+                            // F63：上限 200 太紧 —— 真机（2026-09-15T09-53-54）四个引文式选项长度为 200/217/207/206，
+                            // 被丢掉 3 个只剩 1 个 → 门禁判"选项不足"上锁（死循环）；另一题 303/311/308/300 全被丢
+                            // → optionEls 为空 → 被当成写作题去填编辑器（静默走错分支，更糟）。
+                            // 编辑器外壳已由上面的结构判断排除，这里只需一个防"整块文本被当选项"的上界。
+                            if (!t || t.length > 1200) return false;
                             try { if (li.querySelector('input[type=radio], input[type=checkbox]')) return true; } catch (e) { /* ignore */ }
                             return /^([A-H][、.．:：\s]|(对|错|正确|错误)\s*$)/.test(t);
                         }).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() }));
@@ -3868,17 +4432,39 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const raw = String(questionText == null ? '' : questionText);
                 const t = raw.replace(/【[^】]{1,10}】/g, '').replace(/\s+/g, ' ').trim();
                 if (!t) return { ok: false, reason: '题目文本为空' };
-                if (t.length < 8) return { ok: false, reason: '题目文本过短（' + t.length + ' 字）' };
-                if (/填写答案|段落格式|字体|字号|点击上传|wordNum|edui|取消静音|播放速度|加载完毕|确定|取消|提交|返回|上一题|下一题|继续观看/.test(t)) return { ok: false, reason: '题目疑似编辑器/播放器界面文案' };
+                // F64：短题干 + 真实选项 = 合法的「填空式单选」。真机：「1 【单选题】预防医学是」（解密后 5 字）
+                // 配 A~E 五个完整选项，语义由选项补全；原写法「t.length < 8」先把它判死 → 上锁 → 随重启死循环。
+                // 与 F60（长度 ≥12）/F61（词表）/F62（只认中文）同一类：内容启发式不能压过"已抽到 ≥2 个选项"这个结构证据。
+                // 提前到这里计算，供下面的长度检查与 F60 的长度检查共用（F60 块里的重复声明已删除）。
+                const hasChoiceOptions = !!(question && !question.isShortAnswer && (question.optionEls || []).length >= 2);
+                if (t.length < 8 && !hasChoiceOptions) return { ok: false, reason: '题目文本过短（' + t.length + ' 字）' };
+                // F61：只保留**有辨识度的多字短语**。原先词表里混进了真题中极常见的单/双字词
+                // （提交、确定、取消、字体、字号、返回），导致合法题被误杀 —— 真机：
+                // 「1 【多选题】论文初稿提交有哪些要求？」因含「提交」而上锁，并随自动重启反复触发（死循环）。
+                // 真正的编辑器工具栏 dump 一定含下面这些短语（一整排 UI 标签），合法题干不会。
+                if (/填写答案|段落格式|点击上传|wordNum|edui|取消静音|播放速度|加载完毕|上一题|下一题|继续观看/.test(t)) return { ok: false, reason: '题目疑似编辑器/播放器界面文案' };
                 if (/^[0-9\s.、．]+$/.test(t)) return { ok: false, reason: '题目无有效文字内容' };
                 const cjkCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
-                if (cjkCount < 4) return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
-                // F40（V3.6 补丁）：4~5 字的短题目只要带疑问特征或选择题选项就是合法题（真机：「5【单选题】眶下孔位于？」被误锁）。
-                if (cjkCount < 6 && !/[?？]/.test(t)
+                // F62：内容量的度量不能只认中文 —— 真机两次把**全英文题**当"内容过少"上锁
+                //（会话 2026-09-15T09-12-59 的《课程介绍与思辨性阅读》15 题全英文单选；
+                //  审计里的 2026-09-14T15-00-46 同一道题），且会随自动重启反复触发（死循环）。
+                // 现改为：中文字数 ≥4 **或** 拉丁字母 ≥8 均视为有实质内容。
+                const latinCount = (t.match(/[A-Za-z]/g) || []).length;
+                if (cjkCount < 4 && latinCount < 8) return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
+                // F40（V3.6 补丁）：4~5 字的短中文题只要带疑问特征或选择题选项就是合法题（真机：「5【单选题】眶下孔位于？」被误锁）。
+                // F62：同样不能拿它卡英文题（英文题中文数恒为 0）。
+                if (cjkCount < 6 && latinCount < 8 && !/[?？]/.test(t)
                     && !(question && !question.isShortAnswer && (question.optionEls || []).length >= 2)) {
                     return { ok: false, reason: '题目中文内容过少（' + cjkCount + ' 字）' };
                 }
-                if (t.length < 12 && !/[?？]/.test(t)) return { ok: false, reason: '题目过短且无疑问特征' };
+                // F60：与 F40 同一原则的漏网分支 —— 选择题只要已抽到 ≥2 个选项，就不再强求"含问号或长度 ≥12"。
+                // 真机：题干「1 【单选题】（）相当于总论。」剥掉类型标签后只有 10 字，被误锁；
+                // 且该节点会随 conductor 自动重启反复撞同一个锁（死循环），比"停一次"严重得多。
+                // 空格与字数会因平台把「【单选题】」「（ ）」等另外渲染而失真，选项才是最强证据。
+                // （hasChoiceOptions 已在函数开头计算，见 F64）
+                if (t.length < 12 && !/[?？]/.test(t) && !hasChoiceOptions) {
+                    return { ok: false, reason: '题目过短且无疑问特征' };
+                }
                 if (question && !question.isShortAnswer) {
                     const ops = (question.optionEls || []).length;
                     if (ops < 2) return { ok: false, reason: '选择题有效选项不足（' + ops + ' 个）' };
@@ -3906,8 +4492,28 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     return false;
                 }
             },
+            _optionClickTargets(el) {
+                // F55：选项的「可点目标」按级排列。平台选项常是 <li class=ans-videoquiz-opt> 里套真实
+                // <input type=radio>（ExtJS 渲染）；对父级 li 调 .click() 不会激活内部 radio
+                // （浏览器只在点击目标就是 radio 或其 <label> 时才切换），所以必须逐级下探。
+                const out = [];
+                if (!el || !el.querySelector) return [el];
+                try {
+                    const inp = el.querySelector('input[type="radio"],input[type="checkbox"]');
+                    if (inp) out.push(inp);
+                    let lab = null;
+                    try { lab = (inp && inp.closest) ? inp.closest('label') : null; } catch (e) { lab = null; }
+                    if (!lab) { try { lab = el.querySelector('label'); } catch (e) { lab = null; } }
+                    if (lab && lab !== inp) out.push(lab);
+                } catch (e) { /* ignore */ }
+                out.push(el);
+                return out;
+            },
             _clickWithVerification(picked, cb) {
                 // F41：点击选项后校验是否真的选中；平台偶发丢点击（真机：第 1 题点了没生效 → 有效作答 10/11 上锁）。
+                // F55：改为「逐级升级点击」——每轮只点下一级目标，点完立即复验。
+                //   第 1 轮点内嵌 input、第 2 轮点 label、第 3 轮点容器本身。
+                //   每轮只点一个目标，避免 checkbox 被点两下互相抵消。
                 const done = typeof cb === 'function' ? cb : function () {};
                 const list = Array.isArray(picked) ? picked.filter((c) => c && c.el) : [];
                 if (!list.length) { done(new Error('无可点击选项')); return; }
@@ -3915,9 +4521,20 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const tryClick = () => {
                     attempt++;
                     const missing = list.filter((c) => !this._optionLooksSelected(c.el));
-                    if (!missing.length) { done(null); return; }
-                    if (attempt > 3) { done(new Error('选项点击未生效')); return; }
-                    missing.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
+                    if (!missing.length) {
+                        if (attempt > 1) console.log('%c[LLM] 选项已选中（第 ' + attempt + ' 级点击生效）', 'color:#4CAF50');
+                        done(null);
+                        return;
+                    }
+                    if (attempt > 3) { done(new Error('选项点击未生效（输入框/标签/容器 三级点击均未选中）')); return; }
+                    let tag = '';
+                    for (const c of missing) {
+                        const targets = this._optionClickTargets(c.el);
+                        const target = targets[Math.min(attempt - 1, targets.length - 1)];
+                        tag = (target && target.tagName) ? String(target.tagName).toLowerCase() : '?';
+                        try { target.click(); } catch (e) { /* ignore */ }
+                    }
+                    if (attempt > 1) console.log('%c[LLM] 选项点击第 ' + attempt + ' 次尝试（目标级: ' + tag + '）', 'color:#FF9800');
                     this._schedule(tryClick, 350);
                 };
                 tryClick();
@@ -3978,6 +4595,37 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     }
                 } catch (e) { /* ignore */ }
                 return false;
+            },
+            // F48：调用平台原生「暂时保存」（作业帧内 a.btnSave[onclick=noSubmit()]）
+            // 返回 done(ok)；ok=true 表示暂存动作已发出（不代表平台已确认）
+            _saveWorkDraft(quizWin, topDoc, done) {
+                const finish = typeof done === 'function' ? done : function () {};
+                const clickConfirm = () => {
+                    try {
+                        const all = Array.from(topDoc.querySelectorAll('a, button, span'));
+                        const btn = all.filter((el) => {
+                            const t = (el.innerText || '').trim();
+                            if (t !== '确定' && t !== '是' && t !== '好的') return false;
+                            return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                        })[0];
+                        if (btn) { btn.click(); return true; }
+                    } catch (e) { /* ignore */ }
+                    return false;
+                };
+                try {
+                    let called = false;
+                    if (quizWin && typeof quizWin.noSubmit === 'function') { quizWin.noSubmit(); called = true; }
+                    if (!called && quizWin && quizWin.document) {
+                        const el = quizWin.document.querySelector('a.btnSave, #tempsave, a[onclick*="noSubmit"]');
+                        if (el) { el.click(); called = true; }
+                    }
+                    if (!called) { console.warn('%c[作业] 未找到「暂时保存」入口，无法暂存', 'color:#FF9800'); finish(false); return; }
+                    console.log('%c[作业] 已点击「暂时保存」：本次只存草稿、不提交（不确定情况的安全策略）', 'color:#2196F3');
+                    this._schedule(() => { clickConfirm(); finish(true); }, 900);
+                } catch (e) {
+                    console.warn('%c[作业] 暂存失败：' + (e && e.message ? e.message : e), 'color:#FF9800');
+                    finish(false);
+                }
             },
             _submitWork(quizWin, topDoc, done) {
                 if (this.configs.workSanityLock && this._workLocked) {
@@ -4056,14 +4704,47 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     const questions = this._workQuestionList(quiz.doc);
                     if (!questions.length) {
                         this._workBusy = false;
-                        console.warn('%c[LLM] 未识别到题目结构，已停止自动前进（绝不跳过）', 'color:#FF9800');
+                        // 用户 2026-09-16 规则：定位不到题目结构时**不提交**，并按配置**跳过该任务点**继续。
+                        // 真机 2026-09-16 23:33：节点「视频+章节测验」双任务点，视频完成、切到测验后定位不到题目 →
+                        // 原先硬停（绝不跳过）→ loopAlive=false + embedded=true 持续 2 拍 → 守望器 self-stopped → 整轮被停。
+                        // 跳过不丢数据：该任务点仍未完成，下一轮/重进本课时会再处理。
+                        if (this.configs.llmSkipNodeAfterRetries === false) {
+                            console.warn('%c[LLM] 未识别到题目结构，已停止自动前进（llmSkipNodeAfterRetries=false）', 'color:#FF9800');
+                            return;
+                        }
+                        console.warn('%c[LLM] 未识别到题目结构（不提交）→ 按规则跳过该任务点继续推进', 'color:#FF9800');
+                        try { this._schedule(() => { try { this.nextUnit(); } catch (e) { console.error('[LLM] 跳过后推进失败:', e); } }, 1200); }
+                        catch (e) { console.error('[LLM] 跳过后推进失败:', e); }
                         return;
                     }
                     const texts = this._workPlainTexts(work.title, questions.length);
                     console.log('%c[LLM] 作业《' + String(work.title || work.jobid).slice(0, 60) + '》共 ' + questions.length + ' 题', 'color:#2196F3');
                     const giveUp = (msg) => {
                         this._workBusy = false;
-                        console.warn('%c[LLM] 内嵌测验自动作答失败：' + msg + '；已停止自动前进，请人工处理', 'color:#FF9800');
+                        // F48：不确定/失败时先"只暂存不提交"——把已填答案存成草稿，再处理该任务点。
+                        const skipAfter = () => {
+                            // 用户 2026-09-16 规则：心跳重试耗尽后**不提交**，并**跳过该任务点**继续刷后面，
+                            // 不再停在原地等人（否则整条自动链路被一道题卡死）。跳过 = 之后重进本课再处理，
+                            // 既不会误交不确定答案，也不会丢进度。
+                            if (this.configs.llmSkipNodeAfterRetries === false) {
+                                console.warn('%c[LLM] 内嵌测验自动作答失败：' + msg + '；已停止自动前进（llmSkipNodeAfterRetries=false）', 'color:#FF9800');
+                                return;
+                            }
+                            console.warn('%c[LLM] 内嵌测验自动作答失败：' + msg + '；已按规则【不提交 + 跳过该任务点】继续推进', 'color:#FF9800');
+                            try { this._schedule(() => { try { this.nextUnit(); } catch (e) { console.error('[LLM] 跳过后推进失败:', e); } }, 1200); }
+                            catch (e) { console.error('[LLM] 跳过后推进失败:', e); }
+                        };
+                        if (this.configs.workDraftOnUncertain !== false) {
+                            try {
+                                this._saveWorkDraft(quiz.win, document, (ok) => {
+                                    console.warn('%c[LLM] 内嵌测验自动作答失败：' + msg + '；'
+                                        + (ok ? '已暂存草稿（未提交）' : '且暂存失败'), 'color:#FF9800');
+                                    skipAfter();
+                                });
+                                return;
+                            } catch (e) { /* 落回普通失败日志 */ }
+                        }
+                        skipAfter();
                     };
                     const askNext = (qi) => {
                         if (qi >= questions.length) {
@@ -4104,6 +4785,21 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                 if (!sanity.ok) {
                                     this._lockWork('题目校验未通过：' + sanity.reason, questionText);
                                     giveUp('题目校验未通过（' + sanity.reason + '），已上锁拒绝提交');
+                                    return;
+                                }
+                            }
+                            // F49-A：把**解码后的题干与选项原文**完整打出来，便于人眼核对（不再只报"命中 N 字"）
+                            console.log('%c[字库解密] 第 ' + (qi + 1) + ' 题题干(已解码)：' + String(questionText).slice(0, 220), 'color:#607D8B');
+                            if (decoded.length > 1) {
+                                console.log('%c[字库解密] 第 ' + (qi + 1) + ' 题选项(已解码)：'
+                                    + decoded.slice(1).map((t, i) => String.fromCharCode(65 + i) + ':' + String(t).slice(0, 30)).join(' | '), 'color:#607D8B');
+                            }
+                            // F49-B：仍有"被混淆但没解出"的字 → 判为不确定 → 上锁 + 走 F48「只暂存不提交」
+                            if (this.configs.workDraftOnUncertain !== false) {
+                                const unresolved = this._cxLastUnresolved || [];
+                                if (unresolved.length) {
+                                    this._lockWork('题干解码不完整：' + unresolved.length + ' 个混淆字未解出（' + unresolved.slice(0, 10).join('') + '）', questionText);
+                                    giveUp('题干仍含 ' + unresolved.length + ' 个未解出的混淆字（' + unresolved.slice(0, 10).join('') + '），判为不确定 → 只暂存不提交');
                                     return;
                                 }
                             }
@@ -4209,6 +4905,19 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             _hasUnfinishedDocTask() {
                 try { return this._findDocTaskFrames().some((d) => !d.finished); } catch (e) { return false; }
             },
+            // F44：文档任务点完成判定必须按「本任务点」收敛。
+            // 原实现在等待回调里用「全站是否还有未完成文档任务点」判定本次是否完成：
+            // 同一页面存在多个 PDF/PPT 任务点时该条件永远为真，于是第一个任务点两轮翻阅后必然报
+            // 「滚动后任务点未标记完成」并停止自动前进（真机：12 个任务点，第 1 个已被平台标记仍被判未完成）。
+            _isDocTaskFinished(docTask) {
+                try {
+                    if (!docTask) return true;
+                    if (docTask.finished) return true;
+                    const cur = this._findDocTaskFrames().find((d) => String(d.jobid) === String(docTask.jobid));
+                    if (!cur) return true; // 任务点已不在 DOM（完成后挂件移除）→ 视为完成，避免死等
+                    return !!cur.finished;
+                } catch (e) { return false; }
+            },
             _docScroller(doc) {
                 let best = null;
                 const visit = (d, dep) => {
@@ -4263,7 +4972,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             _processDocTasks(docs, idx, done) {
                 if (idx >= docs.length) { done(true, ''); return; }
                 const docTask = docs[idx];
-                if (docTask.finished) { this._processDocTasks(docs, idx + 1, done); return; }
+                // F44：入口按本任务点复查（快照可能过期，或平台已标记但快照仍为未完成）。
+                if (this._isDocTaskFinished(docTask)) { this._processDocTasks(docs, idx + 1, done); return; }
                 let doc = null;
                 try { doc = docTask.frame.contentDocument; } catch (e) { doc = null; }
                 if (!doc) { done(false, '无法访问文档内容'); return; }
@@ -4277,8 +4987,13 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         if (!ok) { done(false, '翻阅失败：' + msg); return; }
                         console.log('%c[文档任务] 本轮翻阅完成（高度 ' + scroller.scrollHeight + 'px），等待平台标记完成…', 'color:#2196F3');
                         const wait = (leftTicks) => {
-                            const still = this._findDocTaskFrames().filter((d) => !d.finished);
-                            if (!still.length) { done(true, ''); return; }
+                            // F44：只认本任务点是否被标记完成；完成后继续下一个任务点，
+                            // 全部完成时经 idx 越界自然收敛为 done(true)（保持"全部完成才继续推进"的原语义）。
+                            if (this._isDocTaskFinished(docTask)) {
+                                console.log('%c[文档任务] 任务点 ' + String(docTask.jobid).slice(0, 24) + ' 已被平台标记完成，继续下一个任务点', 'color:#4CAF50');
+                                this._processDocTasks(docs, idx + 1, done);
+                                return;
+                            }
                             if (leftTicks <= 0) {
                                 if (left > 1) {
                                     console.log('%c[文档任务] 尚未标记完成，追加一轮翻阅…', 'color:#FF9800');
@@ -4315,6 +5030,237 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         console.warn('%c[文档任务] 自动翻阅未完成：' + msg + '；已停止自动前进，请人工处理', 'color:#FF9800');
                     }
                 });
+                return true;
+            },
+            // ================= F45（V3.6）：讨论任务点（insertbbs/BBS）自动参与 =================
+            _findDiscussTaskFrames() {
+                const found = [];
+                const seen = new Set();
+                const visit = (doc, depth) => {
+                    if (!doc || depth > 6 || seen.has(doc)) return;
+                    seen.add(doc);
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        let src = '';
+                        try { src = String(frame.getAttribute('src') || ''); } catch (e) { src = ''; }
+                        if (/\/modules\/insertbbs\//.test(src)) {
+                            let holder = null;
+                            try { holder = frame.closest ? frame.closest('.ans-attach-ct') : null; } catch (e) { holder = null; }
+                            const finished = holder ? holder.classList.contains('ans-job-finished') : false;
+                            let data = null;
+                            try { data = JSON.parse(String(frame.getAttribute('data') || '{}')); } catch (e) { data = null; }
+                            found.push({ frame: frame, holder: holder, finished: finished, src: src, data: data });
+                            continue;
+                        }
+                        let childDoc = null;
+                        try { childDoc = frame.contentDocument; } catch (e) { childDoc = null; }
+                        if (childDoc) visit(childDoc, depth + 1);
+                    }
+                };
+                visit(typeof document === 'undefined' ? null : document, 0);
+                return found;
+            },
+            _hasUnfinishedDiscussTask() {
+                try { return this._findDiscussTaskFrames().some((d) => !d.finished); } catch (e) { return false; }
+            },
+            _discussTopicUrl(item) {
+                // 1) 首选：讨论卡片 #topicMainDiv[data]（insertbbs 帧内同源，含 bbsid/uuid/courseId/classId）
+                try {
+                    const doc = item.frame.contentDocument;
+                    if (doc) {
+                        const seen = new Set();
+                        let url = '';
+                        const visit = (d, depth) => {
+                            if (!d || depth > 3 || url || seen.has(d)) return;
+                            seen.add(d);
+                            let card = null;
+                            try { card = d.getElementById ? d.getElementById('topicMainDiv') : null; } catch (e) { card = null; }
+                            if (card) { url = String(card.getAttribute('data') || ''); if (url) return; }
+                            let frames = [];
+                            try { frames = Array.from(d.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                            for (const f of frames) {
+                                let cd = null;
+                                try { cd = f.contentDocument; } catch (e) { cd = null; }
+                                if (cd) visit(cd, depth + 1);
+                                if (url) return;
+                            }
+                        };
+                        visit(doc, 0);
+                        if (url) return url;
+                    }
+                } catch (e) { /* ignore */ }
+                // 2) 退化：章节讨论面板里的同类话题链接
+                try {
+                    const a = document.querySelector('#posDiscussScroll a[href*="replysList"], a[href*="replysList"]');
+                    if (a) return String(a.getAttribute('href') || '');
+                } catch (e) { /* ignore */ }
+                return '';
+            },
+            _httpPost(url, body, cb) {
+                // F45：POST 传输。油猴走 GM_xmlhttpRequest（自带 cookie、不受 CORS 限制）；
+                // 宿主注入的传输以第 3 个参数收到 {method,data}（旧实现忽略该参数会退化为 GET，由平台拒绝，不会伪造成功）。
+                const done = typeof cb === 'function' ? cb : function () {};
+                if (this._httpTransport) {
+                    try { this._httpTransport(String(url), done, { method: 'POST', data: String(body), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }); } catch (e) { done(e); }
+                    return;
+                }
+                let gm = null;
+                try {
+                    if (typeof GM_xmlhttpRequest !== 'undefined' && GM_xmlhttpRequest) gm = GM_xmlhttpRequest;
+                    else if (window && window.GM_xmlhttpRequest) gm = window.GM_xmlhttpRequest;
+                } catch (e) { gm = null; }
+                if (typeof gm !== 'function') { done(new Error('当前环境没有 HTTP 传输（油猴 GM_xmlhttpRequest 或 app.setHttpTransport），无法提交讨论回复')); return; }
+                try {
+                    gm({
+                        method: 'POST',
+                        url: String(url),
+                        data: String(body),
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        onload: (res) => done(null, res && res.responseText),
+                        onerror: (err) => done(err || new Error('HTTP 错误')),
+                        ontimeout: () => done(new Error('HTTP 超时')),
+                    });
+                } catch (e) { done(e); }
+            },
+            _uuid4() {
+                try { if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID(); } catch (e) { /* ignore */ }
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+                    const r = Math.random() * 16 | 0;
+                    return (ch === 'x' ? r : ((r & 0x3) | 0x8)).toString(16);
+                });
+            },
+            _discussReplyText(item, cb) {
+                const fixed = String(this.configs.discussReplyText || '').trim();
+                if (fixed) { cb(null, fixed); return; }
+                const d = (item && item.data) || {};
+                const title = String(d.title || this._currentStepTitle() || '').slice(0, 100);
+                const detail = String(d.detail || '').replace(/\s+/g, ' ').slice(0, 1500);
+                if (!this.configs.llmEnabled || !this._llmApiKey) {
+                    cb(new Error('未配置讨论回复文本：请开启 LLM（app.configs.llmEnabled=true + app.setLlmKey）或设置 app.configs.discussReplyText'));
+                    return;
+                }
+                const prompt = '你是口腔医学课程的学生，正在参与课程讨论。请针对下面的话题写一段 150~400 字的回复：'
+                    + '紧扣话题给到的病例/资料与量化数据，分点给出可执行的处理思路，语气客观、像学生参与讨论；'
+                    + '不要出现"作为AI""根据资料"等字样，不要复述题目，不要用 Markdown 标题。\n\n'
+                    + '话题标题：' + title + '\n话题内容：' + detail;
+                const payload = {
+                    model: this.configs.llmModel,
+                    messages: [{ role: 'user', content: prompt }],
+                    max_tokens: Math.max(1024, Number(this.configs.llmMaxTokens) || 4096),
+                    temperature: 0.3,
+                };
+                this._llmRequest(payload, (content) => {
+                    let out = String(content || '').replace(/^\s*```[\s\S]*?\n/, '').replace(/```\s*$/, '').trim();
+                    if (!out) { cb(new Error('LLM 未返回可用回复文本')); return; }
+                    cb(null, out.slice(0, 900));
+                }, (err) => cb(err || new Error('LLM 请求失败')));
+            },
+            _reloadDiscussCard(item) {
+                // F45：重载讨论卡片，让服务端 isFinished 重新下发 → 卡片 postMessage → insertbbs greenligth() → ans-job-finished
+                try {
+                    const doc = item.frame.contentDocument;
+                    if (!doc) return;
+                    const seen = new Set();
+                    const visit = (d, depth) => {
+                        if (!d || depth > 3 || seen.has(d)) return;
+                        seen.add(d);
+                        let frames = [];
+                        try { frames = Array.from(d.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                        for (const f of frames) {
+                            let u = '';
+                            try { u = String(f.contentWindow.location.href || ''); } catch (e) { u = ''; }
+                            if (/bbscircle/.test(u)) { try { f.contentWindow.location.reload(); } catch (e) { /* ignore */ } }
+                            let cd = null;
+                            try { cd = f.contentDocument; } catch (e) { cd = null; }
+                            if (cd) visit(cd, depth + 1);
+                        }
+                    };
+                    visit(doc, 0);
+                } catch (e) { /* ignore */ }
+            },
+            _discussParticipate(item, cb) {
+                const url = this._discussTopicUrl(item);
+                if (!url) { cb(new Error('未找到讨论话题链接（topicMainDiv[data] / replysList）')); return; }
+                const m = /\/topic\/v3\/bbs\/([0-9a-zA-Z-]+)\/([0-9a-zA-Z-]+)\/replysList/.exec(url);
+                if (!m) { cb(new Error('讨论话题 URL 解析失败：' + url.slice(0, 90))); return; }
+                const bbsid = m[1];
+                const topicUuid = m[2];
+                const q = (k) => { const r = new RegExp('[?&]' + k + '=([^&]*)').exec(url); return r ? r[1] : ''; };
+                const courseId = q('courseId');
+                const classId = q('classId');
+                // F45：回帖端点一律由话题 URL 推导 origin，不在源码里硬编码外部主机（满足 F5-2 外部 URL 静态策略）。
+                let raw = String(url).trim();
+                if (raw.indexOf('//') === 0) raw = 'https:' + raw;
+                let origin = '';
+                try { origin = new URL(raw).origin; } catch (e) { origin = ''; }
+                if (!/^https?:/.test(raw) || !origin) { cb(new Error('讨论话题 URL 不是绝对地址，无法确定回帖端点：' + raw.slice(0, 90))); return; }
+                this._httpGet(raw, (err, html) => {
+                    if (err) { cb(new Error('获取讨论话题页失败（跨域需 GM_xmlhttpRequest 或宿主传输）：' + (err.message || err))); return; }
+                    const tk = /urlToken\s*[:=]\s*["']([^"']+)["']/.exec(String(html || ''));
+                    if (!tk) { cb(new Error('讨论话题页未返回 urlToken（未登录或页面结构变化）')); return; }
+                    this._discussReplyText(item, (tErr, text) => {
+                        if (tErr) { cb(tErr); return; }
+                        const body = [
+                            'courseId=' + encodeURIComponent(courseId),
+                            'classId=' + encodeURIComponent(classId),
+                            'replyId=',
+                            'uuid=' + this._uuid4(),
+                            'topic_content=' + encodeURIComponent(text),
+                            'files_url=',
+                            'files_attr=',
+                            'anonymous=0',
+                            'urlToken=' + encodeURIComponent(tk[1]),
+                            'bbsid=' + encodeURIComponent(bbsid),
+                        ].join('&');
+                        const postUrl = origin + '/pc/invitation/' + topicUuid + '/addReplys';
+                        this._httpPost(postUrl, body, (pErr, res) => {
+                            if (pErr) { cb(new Error('提交讨论回复失败：' + (pErr.message || pErr))); return; }
+                            let ok = false;
+                            try { ok = !!JSON.parse(String(res || '{}')).status; } catch (e) { ok = false; }
+                            if (!ok) { cb(new Error('平台未接受讨论回复：' + String(res || '').slice(0, 160))); return; }
+                            console.log('%c[讨论任务] 已提交讨论回复（' + text.length + ' 字），等待平台标记完成…', 'color:#4CAF50');
+                            this._reloadDiscussCard(item);
+                            const waitMs = Math.max(5000, Number(this.configs.discussTaskWaitMs) || 60000);
+                            this._schedule(() => {
+                                const jobid = item.data && item.data.jobid ? String(item.data.jobid) : '';
+                                const all = this._findDiscussTaskFrames();
+                                const cur = jobid ? all.find((d) => String(d.data && d.data.jobid) === jobid) : all.find((d) => !d.finished);
+                                if (cur && cur.finished) { cb(null); return; }
+                                cb(new Error('回复已提交但任务点未标记完成（讨论卡片可能未刷新或平台延迟）'));
+                            }, waitMs);
+                        });
+                    });
+                });
+            },
+            _handleDiscussTasks() {
+                if (this._discussTaskBusy) return true;
+                const list = this._findDiscussTaskFrames().filter((d) => !d.finished);
+                if (!list.length) return false;
+                if (!this.configs.discussTaskAuto) {
+                    console.warn('%c[讨论任务] 检测到 ' + list.length + ' 个未完成讨论任务点（BBS）：按当前配置不自动参与，已停止自动前进（绝不跳过）。'
+                        + '开启：app.configs.discussTaskAuto = true', 'color:#FF9800');
+                    return true;
+                }
+                this._discussTaskBusy = true;
+                console.log('%c[讨论任务] 检测到 ' + list.length + ' 个未完成讨论任务点（BBS），开始自动参与…', 'color:#2196F3');
+                const nextTask = (idx) => {
+                    if (idx >= list.length) {
+                        this._discussTaskBusy = false;
+                        console.log('%c[讨论任务] 已全部参与完成，继续推进', 'color:#4CAF50');
+                        this._schedule(() => this.play(), 2000);
+                        return;
+                    }
+                    this._discussParticipate(list[idx], (err) => {
+                        if (err) {
+                            this._discussTaskBusy = false;
+                            console.warn('%c[讨论任务] 自动参与未完成：' + (err.message || err) + '；已停止自动前进，请人工处理', 'color:#FF9800');
+                            return;
+                        }
+                        nextTask(idx + 1);
+                    });
+                };
+                nextTask(0);
                 return true;
             },
             destroy() {

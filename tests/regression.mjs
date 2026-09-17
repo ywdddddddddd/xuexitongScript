@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * V3.4 回归测试（jsdom，不联网）
  *
@@ -1712,6 +1712,763 @@ test('F13-1 文档任务点（教案/PDF）：默认绝不跳过；开启后滚�
     await env.advance(40000);
     check('F13-1 完成后打印全部完成并推进', env.xt.has('已全部完成，继续推进'), '');
 });
+test('F44-1 多任务点：完成判定按本任务点收敛，第 1 个完成后继续第 2 个而不是误报未完成', async () => {
+    // 真机复现（2026-09-14 16:35，课程 16 口腔种植学）：同页面 12 个 PDF 任务点，
+    // 第 1 个已被平台标记 ans-job-finished，旧实现仍报「滚动后任务点未标记完成」并停止自动前进。
+    const docHtml = '<div class="ans-attach-ct"><iframe id="docFrame1" jobid="doc-1" src="/ananas/modules/pdf/index.html"></iframe></div>'
+        + '<div class="ans-attach-ct"><iframe id="docFrame2" jobid="doc-2" src="/ananas/modules/pdf/index.html"></iframe></div>';
+    const html = tree(chapterSpecs(['1.1'], ['2.1'])) + '<div class="prev_title" title="教案"></div>' + docHtml;
+    const env = createEnv({ html });
+    const app = await env.boot();
+    await env.advance(20000);
+    check('F44-1 检测到 2 个未完成文档任务点', env.xt.has('2 个未完成文档任务点'), '');
+    app.configs.docTaskScroll = true;
+    const scroller = env.window.document.createElement('div');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 300, configurable: true });
+    let scrollTop = 0;
+    Object.defineProperty(scroller, 'scrollTop', { get: () => scrollTop, set: (v) => { scrollTop = v; }, configurable: true });
+    env.window.document.body.appendChild(scroller);
+    app._docScroller = () => scroller;
+    app.run();
+    await env.advance(8000);
+    check('F44-1 先翻阅第 1 个任务点', env.xt.has('开始翻阅 doc-1'), '');
+    // 平台只把第 1 个标记完成，第 2 个仍未完成 —— 旧实现在此必然误报「未标记完成」并停止自动前进
+    env.window.document.querySelectorAll('.ans-attach-ct')[0].classList.add('ans-job-finished');
+    await env.advance(20000);
+    check('F44-1 第 1 个完成后判定为已完成', env.xt.has('已被平台标记完成，继续下一个任务点'), '');
+    check('F44-1 继续翻阅第 2 个任务点', env.xt.has('开始翻阅 doc-2'), '');
+    check('F44-1 未误报「滚动后任务点未标记完成」', !env.xt.has('滚动后任务点未标记完成'), '');
+    // 第 2 个也被标记完成 → 才允许继续推进（原「全部完成才前进」语义不变）
+    env.window.document.querySelectorAll('.ans-attach-ct')[1].classList.add('ans-job-finished');
+    await env.advance(20000);
+    check('F44-1 两个都完成后才继续推进', env.xt.has('已全部完成，继续推进'), '');
+});
+test('F45-1 讨论任务点（insertbbs/BBS）：识别 → 参与 → 平台标记完成', async () => {
+    // 真机逆向（2026-09-14 课程16「2.3 种植修复诊疗方案设计」）：任务点结构 = .ans-attach-ct（无 ans-job-finished）
+    // → insertbbs 模块帧（无 jobid，data 带 mid/jobid）→ bbscircle 讨论卡片；完成链路 = 服务端 isFinished → 卡片
+    // postMessage{opType:completeTopic} → insertbbs greenligth() → 外层加 ans-job-finished。回帖端点在跨域 groupweb。
+    const discussHtml = '<div class="ans-attach-ct">'
+        + '<div class="ans-job-icon" aria-label="任务点未完成"></div>'
+        + '<iframe id="bbsFrame" src="/ananas/modules/insertbbs/index.html?v=1" data=\'{"title":"如何设计种植方案？","mid":"7535281745581786681619163","jobid":"178668161915990","isJob":true}\'></iframe>'
+        + '</div>'
+        + '<a href="https://groupweb.chaoxing.com/course/topic/v3/bbs/6785ed06c21ecb0c628d38ac9012d344/fd668e90ce2e49e29e28220a0cb5e035/replysList?courseId=265718603&classId=151044885">如何设计种植方案？</a>';
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'], ['2.1'])) + '<div class="prev_title" title="讨论"></div>' + discussHtml });
+    const app = await env.boot();
+    await env.advance(3000);
+    const found = app._findDiscussTaskFrames();
+    check('F45-1 识别到 1 个讨论任务点', found.length === 1, 'len=' + found.length);
+    check('F45-1 未完成状态判定正确', !!found[0] && found[0].finished === false, '');
+    check('F45-1 话题 URL 可从章节讨论面板取得', !!found[0] && /replysList/.test(app._discussTopicUrl(found[0])), found[0] ? app._discussTopicUrl(found[0]).slice(0, 70) : '');
+    check('F45-1 存在未完成讨论任务点', app._hasUnfinishedDiscussTask() === true, '');
+    // 关闭自动参与 → 只提示、零点击、停止前进（绝不跳过）
+    app.configs.discussTaskAuto = false;
+    const clicksBefore = env.clicks.length;
+    app._handleDiscussTasks();
+    await env.advance(3000);
+    check('F45-1 关闭时不自动参与并明确提示', env.xt.has('不自动参与'), '');
+    check('F45-1 关闭时零点击不跳过', env.clicks.length === clicksBefore, 'before=' + clicksBefore + ' after=' + env.clicks.length);
+    // 开启自动参与：注入传输替身（GET 返回带 urlToken 的话题页；POST 记录并模拟平台标记完成）
+    app.configs.discussTaskAuto = true;
+    app.configs.discussReplyText = '针对本病例：建议同期上颌窦内提+GBR，并注意角化龈增宽。';
+    app.configs.discussTaskWaitMs = 5000;
+    const posts = [];
+    app._httpTransport = (url, cb, opts) => {
+        if (opts && String(opts.method).toUpperCase() === 'POST') {
+            posts.push({ url: String(url), data: String(opts.data) });
+            env.window.document.querySelector('.ans-attach-ct').classList.add('ans-job-finished');
+            cb(null, '{"status":true,"msg":"回复成功"}');
+            return;
+        }
+        cb(null, '<html><script>window.obj={urlToken:"tok-12345"};</script></html>');
+    };
+    app._handleDiscussTasks();
+    await env.advance(2000);
+    check('F45-1 提交到平台回帖端点', posts.length === 1 && posts[0].url === 'https://groupweb.chaoxing.com/pc/invitation/fd668e90ce2e49e29e28220a0cb5e035/addReplys', JSON.stringify(posts.map((p) => p.url)));
+    check('F45-1 回帖参数含 urlToken/bbsid/courseId/topic_content', !!posts[0] && /urlToken=tok-12345/.test(posts[0].data) && /bbsid=6785ed06c21ecb0c628d38ac9012d344/.test(posts[0].data) && /courseId=265718603/.test(posts[0].data) && /topic_content=/.test(posts[0].data), posts[0] ? posts[0].data.slice(0, 140) : '');
+    await env.advance(40000);
+    check('F45-1 平台标记完成后继续推进', env.xt.has('已全部参与完成，继续推进'), '');
+});
+test('F45-2 讨论任务点：无回复文本来源时拒绝提交（绝不伪造完成）', async () => {
+    const discussHtml = '<div class="ans-attach-ct"><iframe id="bbsFrame2" src="/ananas/modules/insertbbs/index.html" data=\'{"title":"话题","jobid":"job-2"}\'></iframe></div>'
+        + '<a href="https://groupweb.chaoxing.com/course/topic/v3/bbs/aaaa/bbbb/replysList?courseId=1&classId=2">话题</a>';
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + discussHtml });
+    const app = await env.boot();
+    await env.advance(3000);
+    const posts = [];
+    app._httpTransport = (url, cb, opts) => {
+        if (opts && String(opts.method).toUpperCase() === 'POST') { posts.push(String(url)); cb(null, '{"status":true}'); return; }
+        cb(null, 'window.obj={urlToken:"tok"};');
+    };
+    app.configs.llmEnabled = false;
+    app.configs.discussReplyText = '';
+    app._handleDiscussTasks();
+    await env.advance(5000);
+    check('F45-2 无文本来源时不提交', posts.length === 0, 'posts=' + posts.length);
+    check('F45-2 明确报告未配置回复文本', env.xt.has('未配置讨论回复文本'), '');
+    check('F45-2 未把任务点标记为完成', env.window.document.querySelector('.ans-attach-ct').classList.contains('ans-job-finished') === false, '');
+});
+
+// ---------------------------------------------------------------------------
+// F53 模型降级链（真机：默认模型被地区门禁 403 RegionError → 每题失败 → 只暂存不提交 → 停机）
+// ---------------------------------------------------------------------------
+
+test('F53-1 模型链：主模型+备用去重保序；默认单模型 deepseek-v4-flash（用户 2026-09-16 指定不切换模型）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    check('F53-1 默认模型是 deepseek-v4-flash', app.configs.llmModel === 'deepseek-v4-flash', app.configs.llmModel);
+    check('F53-1 默认模型不是实测空响应的 deepseek-flash（护栏）', app.configs.llmModel !== 'deepseek-flash', app.configs.llmModel);
+    const chain = app._llmModelChain();
+    check('F53-1 模型链含主模型与全部备用', chain[0] === app.configs.llmModel && app.configs.llmModelFallbacks.every((m) => chain.indexOf(m) >= 0), JSON.stringify(chain));
+    check('F53-1 默认不切换模型（链长=1 且开关关闭）', chain.length === 1 && app.configs.llmModelFallbackOn === false, 'len=' + chain.length + ' on=' + app.configs.llmModelFallbackOn);
+    check('F53-1 链内无重复', new Set(chain).size === chain.length, JSON.stringify(chain));
+    const custom = app.setLlmModels('m-primary', ['m-b', 'm-b', '', null, 'm-a']);
+    app.configs.llmModelFallbackOn = true; // 默认已关闭（用户要求单模型不切换），本用例专门验证降级链
+    check('F53-1 setLlmModels 去重去空保序', JSON.stringify(custom) === JSON.stringify(['m-primary', 'm-b', 'm-a']), JSON.stringify(custom));
+    app.destroy();
+});
+
+test('F53-2 403 RegionError：自动降级到备用模型并粘性复用', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    app.setLlmModels('dead-model', ['alive-model', 'spare-model']);
+    app.configs.llmModelFallbackOn = true; // 默认已关闭（用户要求单模型不切换），本用例专门验证降级链
+    const seen = [];
+    app.setLlmTransport((o) => {
+        const body = JSON.parse(String(o.data || '{}'));
+        seen.push(body.model);
+        if (body.model === 'dead-model') {
+            o.onload(403, '{"type":"error","error":{"type":"RegionError","message":"only available hosted in China"}}');
+        } else {
+            o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"B"}' }, finish_reason: 'stop' }] }));
+        }
+        return null;
+    });
+    const opts = [{ el: {}, text: 'A 甲', letter: 'A' }, { el: {}, text: 'B 乙', letter: 'B' }];
+    let out = null;
+    app._llmAskChoice('题目', opts, false, (err, result) => { out = { err: err && err.message, result: result }; });
+    await env.advance(8000);
+    check('F53-2 首个模型失败后改用备用模型', seen.length === 2 && seen[0] === 'dead-model' && seen[1] === 'alive-model', JSON.stringify(seen));
+    check('F53-2 备用模型作答成功', !!(out && !out.err && out.result && out.result.picked.length === 1 && out.result.picked[0].letter === 'B'), JSON.stringify(out && out.result && out.result.picked));
+    check('F53-2 记录可用的模型下标（下次直接复用）', app._llmModelIndex === 1, 'idx=' + app._llmModelIndex);
+    check('F53-2 打印降级日志含原因', env.xt.has('RegionError') && env.xt.has('自动降级到 alive-model'), JSON.stringify(env.xt.logs.slice(-3)));
+    app.destroy();
+});
+
+test('F53-3 HTTP 400（不支持 response_format）：去掉该参数重试同一模型', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    app.setLlmModels('strict-model', ['other-model']);
+    app.configs.llmModelFallbackOn = true; // 默认已关闭（用户要求单模型不切换），本用例专门验证降级链
+    const seen = [];
+    app.setLlmTransport((o) => {
+        const body = JSON.parse(String(o.data || '{}'));
+        seen.push({ model: body.model, json: body.response_format !== undefined });
+        if (body.response_format !== undefined) {
+            o.onload(400, '{"error":{"type":"invalid_request_error","message":"response_format is not supported"}}');
+        } else {
+            o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"A"}' }, finish_reason: 'stop' }] }));
+        }
+        return null;
+    });
+    const opts = [{ el: {}, text: 'A 甲', letter: 'A' }, { el: {}, text: 'B 乙', letter: 'B' }];
+    let out = null;
+    app._llmAskChoice('题目', opts, false, (err, result) => { out = { err: err && err.message, result: result }; });
+    await env.advance(8000);
+    check('F53-3 第一次带 response_format、第二次去掉', seen.length === 2 && seen[0].json === true && seen[1].json === false, JSON.stringify(seen));
+    check('F53-3 不换模型（同一模型去掉参数即成功）', seen[0].model === 'strict-model' && seen[1].model === 'strict-model', JSON.stringify(seen.map((s) => s.model)));
+    check('F53-3 作答成功', !!(out && !out.err && out.result && out.result.answer === 'A'), JSON.stringify(out && out.result));
+    check('F53-3 记住该模型不支持 json_mode', app._llmNoJsonMode === true, 'noJson=' + app._llmNoJsonMode);
+    app.destroy();
+});
+
+test('F53-4 空响应（finish_reason=length）也降级，不把空内容当答案', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    app.setLlmModels('reasoning-hog', ['plain-model']);
+    app.configs.llmModelFallbackOn = true; // 默认已关闭（用户要求单模型不切换），本用例专门验证降级链
+    const seen = [];
+    app.setLlmTransport((o) => {
+        const body = JSON.parse(String(o.data || '{}'));
+        seen.push(body.model);
+        if (body.model === 'reasoning-hog') {
+            o.onload(200, JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }));
+        } else {
+            o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"AB"}' }, finish_reason: 'stop' }] }));
+        }
+        return null;
+    });
+    const opts = [{ el: {}, text: 'A 甲', letter: 'A' }, { el: {}, text: 'B 乙', letter: 'B' }];
+    let out = null;
+    app._llmAskChoice('题目', opts, true, (err, result) => { out = { err: err && err.message, result: result }; });
+    await env.advance(8000);
+    check('F53-4 空响应触发降级', seen.length === 2 && seen[0] === 'reasoning-hog' && seen[1] === 'plain-model', JSON.stringify(seen));
+    check('F53-4 改用备用模型拿到答案', !!(out && !out.err && out.result && out.result.answer === 'AB'), JSON.stringify(out && out.result));
+    app.destroy();
+});
+
+test('F53-5 全部模型不可用：仍然失败且不产生任何答案（安全策略不放松）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    app.setLlmModels('d1', ['d2', 'd3']);
+    app.configs.llmModelFallbackOn = true; // 默认已关闭（用户要求单模型不切换），本用例专门验证降级链
+    app.configs.llmModelFallbackOn = true; // 默认已关闭（用户要求单模型），本用例专门验证降级链功能
+    let calls = 0;
+    app.setLlmTransport((o) => {
+        calls++;
+        o.onload(403, '{"type":"error","error":{"type":"RegionError","message":"blocked"}}');
+        return null;
+    });
+    const opts = [{ el: {}, text: 'A 甲', letter: 'A' }, { el: {}, text: 'B 乙', letter: 'B' }];
+    let out = null;
+    app._llmAskChoice('题目', opts, false, (err, result) => { out = { err: err && err.message, result: result }; });
+    // 心跳重试（60 秒 × 最多 3 次）：整链失败后不会立刻回调，必须把虚拟时钟推过 3 个心跳周期才拿到最终失败。
+    await env.advance(40000);
+    check('F53-5 首个心跳周期内不提前宣告失败（仍在重试）', !out, JSON.stringify(out));
+    // 逐周期推进（这才是"心跳"的真实语义）：一次 advance(大数) 不会顺序跑完多个 60 秒定时器，
+    // 且每次重试链可能从上次失败的模型继续（只 1 次调用），所以要多推几轮才能走完 5 次心跳。
+    for (let i = 0; i < 12; i++) await env.advance(60000); // 5 次心跳 + 余量
+    check('F53-5 三个模型都试过（含重试）', calls >= 7, 'calls=' + calls + '（>3 即证明发生了心跳重试）');
+    check('F53-5 最终失败且无答案', !!(out && out.err) && !(out.result && out.result.picked && out.result.picked.length), JSON.stringify(out && out.err));
+    check('F53-5 按 60 秒心跳重试（至少发生一次重试）', calls >= 7, 'calls=' + calls);
+    check('F53-5 打印「已无更多备用模型」', env.xt.has('已无更多备用模型'), JSON.stringify(env.xt.logs.slice(-2)));
+    check('F53-5 失败后不残留在途标记', app._llmInFlight === false, 'inFlight=' + app._llmInFlight);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F55 视频内嵌题（ExtJS）选项点击：逐级下探 + 未选中绝不提交
+// 真机：LI.ans-videoquiz-opt 内嵌 <input type=radio>，只点 li → input:checked 恒 false
+//      → 重试 3 次必然失败，却照样点提交（平台「已答对 0 题」，白耗作答机会）。
+// ---------------------------------------------------------------------------
+
+function buildVideoQuiz(env, withRadio) {
+    const doc = env.window.document;
+    // 关掉互动看门狗再注入题目 DOM：否则看门狗会把它当成「需人工处理的互动弹窗」，
+    // 走到 _blockInteractionForManual → this._clearTimers()，把本用例排期的提交/重试定时器清掉。
+    // 实测后果：F55-4 变成抖动用例（submits=0 时有时无；套件在 422 与 421 之间交替）。
+    // 用产品自带的开关 interactionGuard（_findInteractionDialog 会据此直接返回 null），而不是改 DOM，
+    // 避免为了迁就测试而扭曲被测算的页面结构。
+    try { if (env.window.app && env.window.app.configs) env.window.app.configs.interactionGuard = false; } catch (e) { /* ignore */ }
+    const scope = doc.createElement('div');
+    scope.className = 'ans-videoquiz';
+    const stem = doc.createElement('div');
+    stem.className = 'ans-videoquiz-stem';
+    stem.textContent = '判断题：批判性阅读分为分析论证和评论论证两个部分的内容。( )';
+    scope.appendChild(stem);
+    const mk = (label) => {
+        const li = doc.createElement('li');
+        li.className = 'ans-videoquiz-opt';
+        if (withRadio) {
+            const inp = doc.createElement('input');
+            inp.type = 'radio';
+            inp.name = 'vq_' + String(Math.random()).slice(2, 8);
+            li.appendChild(inp);
+        }
+        const span = doc.createElement('span');
+        span.textContent = label;
+        li.appendChild(span);
+        scope.appendChild(li);
+        return li;
+    };
+    const a = mk('A、对');
+    const b = mk('B、错');
+    const submit = doc.createElement('a');
+    submit.id = 'vq-submit';
+    submit.className = 'ans-videoquiz-submit';
+    submit.textContent = '提交';
+    scope.appendChild(submit);
+    doc.body.appendChild(scope);
+    return { scope, a, b, submit };
+}
+
+test('F55-1 选项内嵌 radio：逐级点击第 1 级（input）即真正选中', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const { a } = buildVideoQuiz(env, true);
+    check('F55-1 可点目标顺序 input 优先', app._optionClickTargets(a)[0].tagName === 'INPUT', String(app._optionClickTargets(a).map((x) => x.tagName)));
+    let res = 'pending';
+    app._clickWithVerification([{ el: a, text: 'A、对' }], (err) => { res = err ? 'err:' + err.message : 'ok'; });
+    await env.advance(3000);
+    check('F55-1 内嵌 radio 被真正选中（input:checked）', !!a.querySelector('input:checked'), '');
+    check('F55-1 校验通过（无错误）', res === 'ok', res);
+    app.destroy();
+});
+
+test('F55-2 三级点击都无法选中时报错而不是静默放行', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const { b } = buildVideoQuiz(env, false); // 裸 li，没有任何可选态
+    let res = 'pending';
+    app._clickWithVerification([{ el: b, text: 'B、错' }], (err) => { res = err ? 'err:' + err.message : 'ok'; });
+    await env.advance(6000);
+    check('F55-2 返回明确错误', res.indexOf('err:') === 0, res);
+    check('F55-2 错误信息含三级点击说明', /三级点击/.test(res), res);
+    app.destroy();
+});
+
+test('F55-3 未选中时绝不提交：跳过提交并清掉去重键（允许下轮重试）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const doc = env.window.document;
+    const app = await env.boot();
+    const { scope, b, submit } = buildVideoQuiz(env, false);
+    app.configs.llmAutoSubmit = true;
+    let submits = 0;
+    submit.addEventListener('click', () => { submits++; });
+    app._llmLastQuestionKey = 'q-before-f55';
+    app._applyInteractionAnswer(
+        { el: scope, text: '判断题：批判性阅读分为分析论证和评论论证两个部分的内容。( )' },
+        [{ el: b, text: 'B、错' }],
+        { answer: 'B', picked: [{ el: b, text: 'B、错' }], raw: '{"answer":"B"}' }
+    );
+    await env.advance(6000);
+    check('F55-3 未选中 → 一次都没点提交', submits === 0, 'submits=' + submits);
+    check('F55-3 打印「已跳过提交」', env.xt.has('已跳过提交'), JSON.stringify(env.xt.logs.slice(-3).map((l) => l.text)));
+    check('F55-3 去重键被清空（下一轮可对同一题重试）', app._llmLastQuestionKey === '', app._llmLastQuestionKey);
+    check('F55-3 未打印「已自动点击提交」', !env.xt.has('已自动点击提交/继续按钮'), '');
+    app.destroy();
+});
+
+test('F55-4 选中成功后才自动提交', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const { scope, a, submit } = buildVideoQuiz(env, true);
+    app.configs.llmAutoSubmit = true;
+    let submits = 0;
+    submit.addEventListener('click', () => { submits++; });
+    app._applyInteractionAnswer(
+        { el: scope, text: '判断题：批判性阅读分为分析论证和评论论证两个部分的内容。( )' },
+        [{ el: a, text: 'A、对' }],
+        { answer: 'A', picked: [{ el: a, text: 'A、对' }], raw: '{"answer":"A"}' }
+    );
+    await env.advance(8000);
+    check('F55-4 选项已选中', !!a.querySelector('input:checked'), '');
+    check('F55-4 选中后自动提交一次', submits === 1, 'submits=' + submits);
+    check('F55-4 打印「已选择答案 A」', env.xt.has('已选择答案 A'), JSON.stringify(env.xt.logs.slice(-4).map((l) => l.text)));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F56 视频内嵌题：已全对不重答 + 去重键剥噪声（真机：同一题被答两遍，answers=2）
+// ---------------------------------------------------------------------------
+
+test('F56-1 内嵌题容器文本剥噪声：保留题干/选项，且不误伤普通题干', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const raw = '共 1 题，已答对 0 题 单选题主题性阅读的特征不包括（）。A、大批量文献的阅读B、大批量文献的分析性阅读 提交提交中继续学习知识点回看真遗憾，再接再厉！回看 分钟查看解析';
+    const out = app._stripQuizChrome(raw);
+    check('F56-1 去掉计数文案', out.indexOf('共 1 题') < 0 && out.indexOf('已答对') < 0, out);
+    check('F56-1 去掉按钮与评语', out.indexOf('提交') < 0 && out.indexOf('继续学习') < 0 && out.indexOf('查看解析') < 0 && out.indexOf('再接再厉') < 0, out);
+    check('F56-1 保留题干', out.indexOf('单选题主题性阅读的特征不包括') >= 0, out);
+    check('F56-1 保留选项', out.indexOf('大批量文献的阅读') >= 0, out);
+    const plain = '判断题：请选择你认为正确的选项';
+    check('F56-1 普通题干原样返回（安全边界）', app._stripQuizChrome(plain) === plain, app._stripQuizChrome(plain));
+    app.destroy();
+});
+
+test('F56-2 进度解析：已答对==共 N 题 才算全对', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const p0 = app._quizProgress('共 1 题，已答对 0 题 单选题X（）');
+    const p1 = app._quizProgress('共 1 题，已答对 1 题 单选题X（）');
+    const pn = app._quizProgress('普通互动弹窗');
+    check('F56-2 未答对 → allCorrect=false', p0.total === 1 && p0.correct === 0 && p0.allCorrect === false, JSON.stringify(p0));
+    check('F56-2 已答对 1/1 → allCorrect=true', p1.allCorrect === true, JSON.stringify(p1));
+    check('F56-2 无计数文案 → allCorrect=false', pn.allCorrect === false, JSON.stringify(pn));
+    app.destroy();
+});
+
+test('F56-3 已全部答对：不再发 LLM 请求', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    let calls = 0;
+    app.setLlmTransport(() => { calls++; return null; });
+    app.setLlmKey('sk-test-not-a-real-key');
+    app._answerInteractionWithLlm({ text: '共 1 题，已答对 1 题 单选题主题性阅读的特征不包括（）。A、大批量文献的阅读', options: [] });
+    await env.advance(3000);
+    check('F56-3 一次 LLM 请求都没发', calls === 0, 'calls=' + calls);
+    check('F56-3 打印「跳过重复作答」', env.xt.has('跳过重复作答'), JSON.stringify(env.xt.logs.slice(-3).map((l) => l.text)));
+    app.destroy();
+});
+
+test('F56-4 去重键稳定：仅计数变化不产生新键', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    // 用**真实全文**（计数 + 评语 + 无数字的分钟占位同时变化），而不是只改计数的弱情形。
+    const raw0 = '共 1 题，已答对 0 题 单选题主题性阅读的特征不包括（）。A、大批量文献的阅读B、大批量文献的分析性阅读 提交提交中继续学习知识点回看真遗憾，再接再厉！回看 分钟查看解析';
+    const raw1 = '共 1 题，已答对 1 题 单选题主题性阅读的特征不包括（）。A、大批量文献的阅读B、大批量文献的分析性阅读 提交提交中继续学习知识点回看恭喜你，答对了！你的答题水准超过了88%的同学 查看解析';
+    const k0 = app._llmQuestionKey({ text: raw0 });
+    const k1 = app._llmQuestionKey({ text: raw1 });
+    check('F56-4 两键相同', !!k0 && k0 === k1, k0 + ' vs ' + k1);
+    const other = app._llmQuestionKey({ text: '共 1 题，已答对 1 题 单选题另一道完全不同的题（）。A、甲' });
+    check('F56-4 不同题键不同', other !== k0, other);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F57 已答对的互动题反复探测：只限频日志，不改判断（真机 10 秒 7 行刷屏）
+// ---------------------------------------------------------------------------
+
+test('F57-1 已全对重复探测：只打一次提示，但仍不发 LLM 请求', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    let calls = 0;
+    app.setLlmTransport(() => { calls++; return null; });
+    app.setLlmKey('sk-test-not-a-real-key');
+    const found = { text: '共 1 题，已答对 1 题 单选题主题性阅读的特征不包括（）。A、大批量文献的阅读', options: [] };
+    for (let i = 0; i < 6; i++) app._answerInteractionWithLlm(found);
+    await env.advance(3000);
+    const hits = env.logs.filter((l) => String(l.text || '').indexOf('跳过重复作答') >= 0).length;
+    check('F57-1 6 次探测只打 1 行提示（限频生效）', hits === 1, 'hits=' + hits);
+    check('F57-1 期间一次 LLM 请求都没发', calls === 0, 'calls=' + calls);
+    app.destroy();
+});
+
+test('F57-2 换了另一道题：提示重新出现（不是永久静音）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    app.setLlmTransport(() => null);
+    app.setLlmKey('sk-test-not-a-real-key');
+    app._answerInteractionWithLlm({ text: '共 1 题，已答对 1 题 单选题第一道题（）。A、甲', options: [] });
+    app._answerInteractionWithLlm({ text: '共 1 题，已答对 1 题 单选题第二道截然不同的题（）。A、乙', options: [] });
+    await env.advance(3000);
+    const hits = env.logs.filter((l) => String(l.text || '').indexOf('跳过重复作答') >= 0).length;
+    check('F57-2 两道不同的题各提示一次', hits === 2, 'hits=' + hits);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F58 已答对提示：每题只打一次（取代 F57 的 15 秒限频；真机残留为每 15~17 秒一行）
+// ---------------------------------------------------------------------------
+
+test('F58-1 跨过 15 秒窗口也不再重复提示（比 F57 更严：一题只提示一次）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    let calls = 0;
+    app.setLlmTransport(() => { calls++; return null; });
+    app.setLlmKey('sk-test-not-a-real-key');
+    const found = { text: '共 1 题，已答对 1 题 单选题主题性阅读的特征不包括（）。A、大批量文献的阅读', options: [] };
+    for (let i = 0; i < 3; i++) app._answerInteractionWithLlm(found);
+    await env.advance(20000);          // 推进 20 秒（脚手架伪造 Date.now：F57 在此会再打一行）
+    for (let i = 0; i < 3; i++) app._answerInteractionWithLlm(found);
+    await env.advance(3000);
+    const hits = env.logs.filter((l) => String(l.text || '').indexOf('跳过重复作答') >= 0).length;
+    check('F58-1 跨 20 秒仍只 1 行提示', hits === 1, 'hits=' + hits);
+    check('F58-1 期间零 LLM 请求', calls === 0, 'calls=' + calls);
+    app.destroy();
+});
+
+test('F58-2 平台若把该题重置为「已答对 0 题」，必须照常作答（拒绝永久静音的安全前提）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    // 用真实选项元素（带 el），确保重置后确实能走到发请求那一步，而不是靠"空 options 也放行"的假设。
+    const { a, b } = buildVideoQuiz(env, true);
+    const opts = [{ letter: 'A', text: 'A、对', el: a }, { letter: 'B', text: 'B、错', el: b }];
+    let calls = 0;
+    app.setLlmTransport((o) => {
+        calls++;
+        try { o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"A"}' }, finish_reason: 'stop' }] })); } catch (e) { /* ignore */ }
+        return null;
+    });
+    app.setLlmKey('sk-test-not-a-real-key');
+    const stem = '判断题：批判性阅读分为分析论证和评论论证两个部分的内容。( )';
+    app._answerInteractionWithLlm({ text: '共 1 题，已答对 1 题 ' + stem, options: opts });
+    await env.advance(3000);
+    check('F58-2 已答对时不请求 LLM', calls === 0, 'calls=' + calls);
+    app._llmLastQuestionKey = '';      // 平台重置后是同一题干、计数归零
+    app._answerInteractionWithLlm({ text: '共 1 题，已答对 0 题 ' + stem, options: opts });
+    await env.advance(6000);
+    check('F58-2 重置后照常作答（发出 LLM 请求）', calls >= 1, 'calls=' + calls);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F59 内嵌题容器噪声的"无数字变体"：同题两版必须归一到同一去重键（真机同题答两遍）
+// ---------------------------------------------------------------------------
+
+const F59_Q1 = '，已答对 题 单选题（）相当于总论。A、标题B、引言C、目录D、注释';
+const F59_Q2 = '， 单选题（）相当于总论。A、标题B、引言C、目录D、注释';
+
+test('F59-1 无数字计数变体也能剥到同一个题干', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const s1 = app._stripQuizChrome(F59_Q1);
+    const s2 = app._stripQuizChrome(F59_Q2);
+    check('F59-1 两变体剥离结果相同', s1 === s2, JSON.stringify({ s1: s1, s2: s2 }));
+    check('F59-1 题干保留', s1.indexOf('单选题（）相当于总论') >= 0, s1);
+    check('F59-1 计数噪声已除', s1.indexOf('已答对') < 0 && s1.indexOf('共 ') < 0, s1);
+    app.destroy();
+});
+
+test('F59-2 两变体的去重键一致', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const k1 = app._llmQuestionKey({ text: F59_Q1 });
+    const k2 = app._llmQuestionKey({ text: F59_Q2 });
+    check('F59-2 键相同', !!k1 && k1 === k2, k1 + ' vs ' + k2);
+    app.destroy();
+});
+
+test('F59-3 端到端：同题换噪声变体不再触发第二次作答', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const { a, b } = buildVideoQuiz(env, true);
+    const opts = [{ letter: 'A', text: 'A、标题', el: a }, { letter: 'B', text: 'B、引言', el: b }];
+    let calls = 0;
+    app.setLlmTransport((o) => {
+        calls++;
+        try { o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"B"}' }, finish_reason: 'stop' }] })); } catch (e) { /* ignore */ }
+        return null;
+    });
+    app.setLlmKey('sk-test-not-a-real-key');
+    app._answerInteractionWithLlm({ text: F59_Q1, options: opts });
+    await env.advance(4000);
+    const afterFirst = calls;
+    app._answerInteractionWithLlm({ text: F59_Q2, options: opts });   // 只差那段无数字噪声
+    await env.advance(4000);
+    check('F59-3 首次作答发出了请求', afterFirst === 1, 'afterFirst=' + afterFirst);
+    check('F59-3 变体检测被去重（没有第二次请求）', calls === 1, 'calls=' + calls);
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F60 合格性门禁：短题干选择题不得误锁（真机「1 【单选题】（）相当于总论。」被锁 → 随重启死循环）
+// ---------------------------------------------------------------------------
+
+test('F60-1 真机题干：短题干 + 两个选项 → 放行', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const q = { isShortAnswer: false, optionEls: [{}, {}] };
+    const r = app._isQuestionSane('1 【单选题】（）相当于总论。', q);
+    check('F60-1 放行（不再误锁）', r.ok === true, JSON.stringify(r));
+    app.destroy();
+});
+
+test('F60-2 同题干但选项不足 → 仍然拒绝（不放松）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const r0 = app._isQuestionSane('1 【单选题】（）相当于总论。', { isShortAnswer: false, optionEls: [] });
+    const r1 = app._isQuestionSane('1 【单选题】（）相当于总论。', { isShortAnswer: false, optionEls: [{}] });
+    check('F60-2 0 选项 → 拒绝', r0.ok === false, JSON.stringify(r0));
+    check('F60-2 1 选项 → 拒绝', r1.ok === false, JSON.stringify(r1));
+    app.destroy();
+});
+
+test('F60-3 其它拒绝分支不受影响（空/编辑器文案/纯数字/短简答题）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const many = { isShortAnswer: false, optionEls: [{}, {}, {}] };
+    check('F60-3 文本为空 → 拒绝', app._isQuestionSane('', many).ok === false, '');
+    check('F60-3 播放器文案 → 拒绝', app._isQuestionSane('取消静音 播放速度 加载完毕', many).ok === false, '');
+    check('F60-3 纯数字 → 拒绝', app._isQuestionSane('1 2. 3、', many).ok === false, '');
+    check('F60-3 短简答题无问号 → 仍拒绝', app._isQuestionSane('1 【简答题】简述要点。', { isShortAnswer: true, optionEls: [] }).ok === false, '');
+    const okReal = app._isQuestionSane('1 【单选题】下列哪一项是牙釉质的主要成分？', many);
+    check('F60-3 正常题仍放行', okReal.ok === true, JSON.stringify(okReal));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F61 "界面文案"词表去歧义（真机：「1 【多选题】论文初稿提交有哪些要求？」因含「提交」被误锁）
+// ---------------------------------------------------------------------------
+
+test('F61-1 真机题干：含「提交」的合法多选题必须放行', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const q = { isShortAnswer: false, optionEls: [{}, {}, {}] };
+    const r = app._isQuestionSane('1 【多选题】论文初稿提交有哪些要求？', q);
+    check('F61-1 放行（不再因「提交」误锁）', r.ok === true, JSON.stringify(r));
+    const r2 = app._isQuestionSane('1 【多选题】提交论文前要确定哪些事项？', q);
+    check('F61-1 含「提交+确定」也放行', r2.ok === true, JSON.stringify(r2));
+    const r3 = app._isQuestionSane('1 【单选题】论文正文字体有哪些要求？', q);
+    check('F61-1 含「字体」也放行', r3.ok === true, JSON.stringify(r3));
+    app.destroy();
+});
+
+test('F61-2 真正的编辑器/播放器文案仍被拒绝', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const small = { isShortAnswer: false, optionEls: [{}, {}] };
+    check('F61-2 工具栏 dump → 拒绝', app._isQuestionSane('填写答案 段落格式 字体 字号 点击上传', small).ok === false, '');
+    check('F61-2 播放器文案 → 拒绝', app._isQuestionSane('取消静音 播放速度 加载完毕', small).ok === false, '');
+    check('F61-2 富文本痕迹 → 拒绝', app._isQuestionSane('wordNum edui 上一题 下一题', small).ok === false, '');
+    app.destroy();
+});
+
+test('F61-3 其余判据不受影响', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const small = { isShortAnswer: false, optionEls: [{}, {}] };
+    check('F61-3 空文本 → 拒绝', app._isQuestionSane('', small).ok === false, '');
+    check('F61-3 纯数字 → 拒绝', app._isQuestionSane('1 2. 3、', small).ok === false, '');
+    check('F61-3 文本过短 → 拒绝', app._isQuestionSane('1 【简答题】要点。', { isShortAnswer: true, optionEls: [] }).ok === false, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F62 内容门禁不再只认中文（真机：全英文题被"题目中文内容过少（0 字）"误锁）
+// ---------------------------------------------------------------------------
+
+test('F62-1 全英文单选题必须放行（真机原文）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const q = { isShortAnswer: false, optionEls: [{}, {}, {}, {}] };
+    const real = '1 【单选题】When I study now, I’m in a lab with 50 noisy computers. What happened to the quiet chair in a';
+    const r = app._isQuestionSane(real, q);
+    check('F62-1 放行（不再因 0 中文误锁）', r.ok === true, JSON.stringify(r));
+    const r2 = app._isQuestionSane('1 【多选题】Which of the following are true about critical thinking?', q);
+    check('F62-1 另一道英文题也放行', r2.ok === true, JSON.stringify(r2));
+    app.destroy();
+});
+
+test('F62-2 内容确实过少的仍拒绝（不放松）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const q = { isShortAnswer: false, optionEls: [{}, {}] };
+    check('F62-2 只有几个字母 → 拒绝', app._isQuestionSane('1 【单选题】A B C', q).ok === false, '');
+    check('F62-2 纯数字 → 拒绝', app._isQuestionSane('1 2. 3、', q).ok === false, '');
+    check('F62-2 空文本 → 拒绝', app._isQuestionSane('', q).ok === false, '');
+    app.destroy();
+});
+
+test('F62-3 中文题行为不变（含 F40/F60 的放行与守卫）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const q = { isShortAnswer: false, optionEls: [{}, {}] };
+    check('F62-3 中文短题干+选项 → 放行', app._isQuestionSane('1 【单选题】（）相当于总论。', q).ok === true, '');
+    check('F62-3 含「提交」的题 → 放行', app._isQuestionSane('1 【多选题】论文初稿提交有哪些要求？', q).ok === true, '');
+    check('F62-3 选项不足 → 拒绝', app._isQuestionSane('1 【单选题】（）相当于总论。', { isShortAnswer: false, optionEls: [] }).ok === false, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F63 作业选项长度上限（真机：200/217/207/206 的四个选项只剩 1 个 → 上锁；另一题全被丢 → 误判写作题）
+// ---------------------------------------------------------------------------
+
+function mkChoiceTimu(env, optLens, stemText) {
+    const doc = env.window.document;
+    const timu = doc.createElement('div');
+    timu.className = 'TiMu';
+    const title = doc.createElement('div');
+    title.className = 'Zy_TItle';
+    title.textContent = stemText || '1 【单选题】The student is quoting from page 623 of the following essay.';
+    timu.appendChild(title);
+    const ul = doc.createElement('ul');
+    ul.className = 'Zy_ulTop';
+    optLens.forEach((len, i) => {
+        const li = doc.createElement('li');
+        li.className = 'font-cxsecret before-after';
+        li.textContent = String.fromCharCode(65 + i) + ' ' + 'x'.repeat(Math.max(0, len - 2));
+        ul.appendChild(li);
+    });
+    timu.appendChild(ul);
+    doc.body.appendChild(timu);
+    return timu;
+}
+
+test('F63-1 真机长度 200/217/207/206：四个选项都要抽到', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    mkChoiceTimu(env, [200, 217, 207, 206]);
+    const list = app._workQuestionList(env.window.document);
+    const q = list && list[0];
+    check('F63-1 抽到 4 个选项', !!q && q.optionEls.length === 4, q ? 'ops=' + q.optionEls.length : 'no-question');
+    check('F63-1 不被误判为写作题', !!q && q.isShortAnswer === false, q ? 'isShortAnswer=' + q.isShortAnswer : '');
+    app.destroy();
+});
+
+test('F63-2 全部超 200 的长选项：仍抽到 4 个且不是写作题', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    mkChoiceTimu(env, [303, 311, 308, 300]);
+    const list = app._workQuestionList(env.window.document);
+    const q = list && list[0];
+    check('F63-2 抽到 4 个选项', !!q && q.optionEls.length === 4, q ? 'ops=' + q.optionEls.length : 'no-question');
+    check('F63-2 不因"选项为空"被当写作题', !!q && q.isShortAnswer === false, q ? 'isShortAnswer=' + q.isShortAnswer : '');
+    app.destroy();
+});
+
+test('F63-3 异常超长文本仍被排除（上界守卫保留）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    mkChoiceTimu(env, [1300, 1400]);
+    const list = app._workQuestionList(env.window.document);
+    const q = list && list[0];
+    check('F63-3 >1200 的两条都被排除', !!q && q.optionEls.length === 0, q ? 'ops=' + q.optionEls.length : 'no-question');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F64 短题干 + 真实选项 = 合法（真机：1 【单选题】预防医学是，7 字被 t.length<8 判死 → 锁循环）
+// ---------------------------------------------------------------------------
+
+test('F64-1 真机短题干 + 五个选项必须放行', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const q = { isShortAnswer: false, optionEls: [{}, {}, {}, {}, {}] };
+    const r = app._isQuestionSane('1 【单选题】预防医学是', q);
+    check('F64-1 放行（不再因 7 字误锁）', r.ok === true, JSON.stringify(r));
+    const r2 = app._isQuestionSane('1 【单选题】预防医学是', { isShortAnswer: false, optionEls: [{}, {}] });
+    check('F64-1 两个选项也放行', r2.ok === true, JSON.stringify(r2));
+    app.destroy();
+});
+
+test('F64-2 同样题干但选项不足 → 仍拒绝（不放松）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const r0 = app._isQuestionSane('1 【单选题】预防医学是', { isShortAnswer: false, optionEls: [] });
+    const r1 = app._isQuestionSane('1 【单选题】预防医学是', { isShortAnswer: false, optionEls: [{}] });
+    check('F64-2 0 选项 → 拒绝', r0.ok === false && /过短/.test(r0.reason), JSON.stringify(r0));
+    check('F64-2 1 选项 → 拒绝', r1.ok === false, JSON.stringify(r1));
+    app.destroy();
+});
+
+test('F64-3 其余守卫不受影响', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const many = { isShortAnswer: false, optionEls: [{}, {}] };
+    check('F64-3 空文本 → 拒绝', app._isQuestionSane('', many).ok === false, '');
+    check('F64-3 纯数字 → 拒绝', app._isQuestionSane('1 2. 3、', many).ok === false, '');
+    check('F64-3 编辑器短语 → 拒绝', app._isQuestionSane('填写答案 段落格式 字体 字号', many).ok === false, '');
+    check('F64-3 正常题 → 放行', app._isQuestionSane('1 【单选题】下列哪一项是牙釉质的主要成分？', many).ok === true, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F54 font-cxsecret 字体列表：累积式收集（真机：题目按组注入时新字体收不进来 → 乱码题干被当"正常汉字"）
+// ---------------------------------------------------------------------------
+
+test('F54-1 字体未就绪时先解密：字体随后到位必须能重新收集并解码（旧实现永久缓存空列表）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    const tstFontB64 = readFileSync(resolve(repoRoot, 'tests/fixtures/font-cxsecret/font.b64'), 'utf8').trim();
+    const tstMapB64 = readFileSync(resolve(repoRoot, 'tests/fixtures/font-cxsecret/font-map.mini.b64'), 'utf8').trim();
+    env.window.__XT_FONT_MAP_B64 = tstMapB64;
+    app.configs.cxSecretDecode = true;
+    const encrypted = '砲抰材抲是现抳口抮抰植体最常用抪材抲';
+    const expect = '哪种材料是现代口腔种植体最常用的材料';
+    const dec = (text) => new Promise((res) => app._cxSecretDecode([text], (out) => res(String(out[0]))));
+
+    // 阶段 A：font-cxsecret 还没进 DOM（题目组未到 / 规则已随题目组消失）→ 原样返回
+    const a = await dec(encrypted);
+    check('F54-1 阶段A 字体缺失时原样返回', a === encrypted, a);
+
+    // 阶段 B：字体注入（模拟题目组 AJAX 到达）→ 必须能重新收集并解码
+    const st = env.window.document.createElement('style');
+    st.textContent = '@font-face{font-family:"font-cxsecret";src:url(data:application/font-woff;base64,' + tstFontB64 + ') format("woff")}';
+    env.window.document.head.appendChild(st);
+    const b = await dec(encrypted);
+    const lenB = Array.isArray(app._cxFontsB64) ? app._cxFontsB64.length : String(app._cxFontsB64);
+    check('F54-1 阶段B 字体到位后重新收集（缓存 ≥1）', Array.isArray(app._cxFontsB64) && app._cxFontsB64.length >= 1, JSON.stringify(lenB));
+    check('F54-1 阶段B 解码结果正确（F54 核心断言）', b === expect, b);
+
+    // 阶段 C：字体规则"消失"（真机瞬态）→ 已收集的字体不得丢失
+    env.window.document.head.removeChild(st);
+    const c = await dec(encrypted);
+    const lenC = Array.isArray(app._cxFontsB64) ? app._cxFontsB64.length : String(app._cxFontsB64);
+    check('F54-1 阶段C 规则消失后缓存不收缩', Array.isArray(app._cxFontsB64) && app._cxFontsB64.length >= 1, JSON.stringify(lenC));
+    check('F54-1 阶段C 不因规则瞬态而复失', c === expect, c);
+    app.destroy();
+});
 test('F9-1 GUI 面板：默认注入、状态可见、destroy 后移除、可配置关闭', async () => {
     const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
     const app = await env.boot();
@@ -1770,7 +2527,16 @@ test('F5-1 检测到互动答题弹窗 → 暂停跳转 + 提示手动处理，�
     const doc = env.window.document;
     let optionClicks = 0;
     let submitClicks = 0;
-    doc.getElementById('quiz-options').addEventListener('click', () => { optionClicks++; });
+    doc.getElementById('quiz-options').addEventListener('click', (ev) => {
+        optionClicks++;
+        // 真机语义：点击选项即进入选中态。原夹具是裸 <li>，从未有过可观测选中态，
+        // 于是 F5-3 过去只能靠"点不上也照样提交"通过——那正是 F55 要修掉的行为。
+        const li = (ev.target && ev.target.closest) ? ev.target.closest('li') : null;
+        if (li) {
+            Array.from(doc.querySelectorAll('#quiz-options li')).forEach((x) => { x.className = ''; });
+            li.className = 'cur';
+        }
+    });
     doc.getElementById('quiz-submit').addEventListener('click', () => { submitClicks++; });
     const app = await env.boot();
     await env.advance(2000);
@@ -1810,7 +2576,16 @@ test('F5-3 显式开启 LLM：会话头稳定、严格解析 JSON、按答案点
     const doc = env.window.document;
     let optionClicks = 0;
     let submitClicks = 0;
-    doc.getElementById('quiz-options').addEventListener('click', () => { optionClicks++; });
+    doc.getElementById('quiz-options').addEventListener('click', (ev) => {
+        optionClicks++;
+        // 真机语义：点击选项即进入选中态。原夹具是裸 <li>，从未有过可观测选中态，
+        // 于是 F5-3 过去只能靠"点不上也照样提交"通过——那正是 F55 要修掉的行为。
+        const li = (ev.target && ev.target.closest) ? ev.target.closest('li') : null;
+        if (li) {
+            Array.from(doc.querySelectorAll('#quiz-options li')).forEach((x) => { x.className = ''; });
+            li.className = 'cur';
+        }
+    });
     doc.getElementById('quiz-submit').addEventListener('click', () => { submitClicks++; });
     const app = await env.boot();
     await env.advance(2000);
@@ -1931,6 +2706,7 @@ test('F7-2 README 记录的默认配置与实际代码一致', async () => {
         if (raw === 'true') return true;
         if (raw === 'false') return false;
         if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+      if (/^\[.*\]$/.test(raw)) { try { return JSON.parse(raw.replace(/'/g, '"')); } catch (e) { /* 落回字符串比较 */ } }
         return raw.replace(/^['"]|['"]$/g, '');
     };
     const mismatched = [];
@@ -1939,7 +2715,8 @@ test('F7-2 README 记录的默认配置与实际代码一致', async () => {
         const raw = pair[1];
         if (raw.indexOf('{') >= 0 || raw.indexOf('}') >= 0) continue; // 跳过 configs: { 之类的包装行
         if (!(key in app.configs)) { mismatched.push(key + ' 不存在于代码 configs'); continue; }
-        if (String(app.configs[key]) !== String(parseValue(raw))) mismatched.push(`${key}: README=${parseValue(raw)} code=${app.configs[key]}`);
+        const norm = (v) => (Array.isArray(v) ? JSON.stringify(v) : String(v));
+      if (norm(app.configs[key]) !== norm(parseValue(raw))) mismatched.push(`${key}: README=${parseValue(raw)} code=${app.configs[key]}`);
     }
     check('F7-2 README 每个配置项都与代码一致', pairs.length > 0 && mismatched.length === 0, JSON.stringify(mismatched));
     for (const key of ['autoAdvanceNoVideo', 'maxConsecutiveNoVideoAdvances', 'resumeMaxAttemptsPerUnit', 'videoFrameMaxDepth']) {

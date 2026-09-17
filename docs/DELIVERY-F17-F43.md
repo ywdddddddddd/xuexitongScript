@@ -119,3 +119,32 @@ node tests/adversarial.mjs      # 期望：49/49
 ```
 
 > 文档维护：本文件与 README.md 同级维护；后续新增修复编号请从 F44 连续递增，并在 README 修复表与本表登记。
+
+---
+
+## 5. F44 登记（2026-09-14，本表范围外的新增修复）
+
+| 项 | 内容 |
+|---|---|
+| 编号 | F44（文档任务点完成判定按本任务点收敛） |
+| 现场 | 课程 16 口腔种植学「上课课件」节点含 **12 个 PDF 文档任务点**；16:35 自动翻阅第 1 个（`1789004601649623`）后报「滚动后任务点未标记完成；已停止自动前进，请人工处理」，conductor 8 分钟后记 `stalled` |
+| 根因（已确认） | `_processDocTasks` 的等待回调以「**全站**是否还有未完成文档任务点」判定本次是否完成；同页面多任务点时该条件恒为真 → 第一个任务点耗尽 `docTaskAttempts`(2) 轮后必然失败。自然对照：同会话 06:13 / 07:49 两次均为 **1 个**任务点 → `已全部完成` 成功 |
+| 关键证据 | CDP 只读探针：第 1 个任务点 `finished=true`（平台已标记 `ans-job-finished`），其余 11 个 `false` → 证明翻阅动作本身有效，缺陷在完成判定 |
+| 修复（最小范围） | 新增 `_isDocTaskFinished(docTask)`：按 jobid 复查当前 DOM 的 `finished`，任务点已从 DOM 移除视为完成；入口与本任务点复查；等待回调命中后 `_processDocTasks(docs, idx + 1, done)` 依次继续下一个任务点；全部完成仍经 idx 越界收敛为 `done(true)` → `play()`（「绝不跳过、全部完成才前进」语义不变） |
+| 真机验证 | 断点续跑（不导航、就地 destroy→注入→run）：从第 2 个未完成任务点 `1789004873896153` 起，11 个剩余任务点逐个被平台标记完成（未完成数 11 → 0），日志出现 `已全部完成，继续推进`，耗时约 11 分钟 |
+| 离线验证 | 旧版回归 **352/354**（F44 两个断言失败）→ 修复版 **354/354**；`verify-v3` 双入口同步 ✓；`adversarial` **49/49** |
+
+> 本次改动仅涉及 `v3_optimized.js` 的 `_processDocTasks` 完成判定（+1 助手，+2 处调用点）、`tests/regression.mjs` 新增 F44-1 用例、README 修复表登记；未触碰滚动、重试、失败保护等既有逻辑。
+
+## 6. F45 登记（2026-09-14，讨论任务点自动参与）
+
+| 项 | 内容 |
+|---|---|
+| 编号 | F45（讨论任务点 insertbbs/BBS 自动参与） |
+| 现场 | 课程 16「2.3 种植修复诊疗方案设计」节点含 1 个**讨论任务点**（`.ans-attach-ct`，无 `ans-job-finished`），脚本此前无任何处理逻辑（仅有一句人工提示），必然卡住 |
+| 逆向证据（代码级） | ① 任务点结构：holder → `iframe[/ananas/modules/insertbbs/index.html]`（**无 jobid**，`data` 带 `mid`/`jobid`/`isJob`）→ `#frame_content` → `/mooc-ans/bbscircle/chapter?mtopicid=…`（讨论卡片，含隐藏 `input#isFinished`）。② 完成链路：服务端 `isFinished=true` → 卡片 `window.parent.postMessage({opType:"completeTopic"})` → insertbbs 内 `greenligth()` → 外层加 `ans-job-finished`；**当前 `isFinished` 为空 → 平台判定"未参与"**。③ 提交入口在跨域 `groupweb.chaoxing.com`：`topicDetail.js` 的 `$.post($ctx+"/pc/invitation/"+topic.uuid+"/addReplys", {courseId,classId,replyId,uuid,topic_content,files_url,files_attr,anonymous,urlToken,bbsid})`，`urlToken` 仅由该页 HTML 提供；页面内 `fetch` 打该域被 CORS 拦死（`Failed to fetch`）→ 必须走 `GM_xmlhttpRequest`（已在油猴元数据补 `@connect`） |
+| 真机闭环（已验证） | 驱动浏览器内真实回帖 UI（填写 `textarea[placeholder=回复话题]` → 点击 `.replyEdit div.addReply`）：`BEFORE unfinished=1/3` → 提交成功（回复框清空、正文出现）→ 重载讨论卡片 → `AFTER unfinished=0/3`，holder 变 `ans-attach-ct ans-job-finished`，卡片 `isFinished="true"` |
+| 实现（最小范围） | 新增 `_findDiscussTaskFrames` / `_hasUnfinishedDiscussTask` / `_discussTopicUrl` / `_httpPost` / `_discussReplyText` / `_reloadDiscussCard` / `_discussParticipate` / `_handleDiscussTasks` + 2 处门禁（`nextUnit` 与学习主循环）；回帖端点 origin **由话题 URL 推导**（不硬编码外部主机，满足 F5-2） |
+| 安全约束 | 回复文本优先 LLM 生成；未开 LLM 且未设 `discussReplyText` 时**拒绝提交并停止前进**（回归 F45-2 断言零 POST、零完成标记）；不直接篡改 DOM class，完成状态一律由平台自身链路产生 |
+| 验证 | `verify-v3` 双入口同步 ✓ ｜ `regression` **366/366**（新增 F45-1 9 项、F45-2 3 项）｜ `adversarial` **49/49** |
+| 演练兼容性（已实测） | 演练侧新增 **CDP 宿主 HTTP 桥**（`tmp-verify/host-http-bridge.mjs`，`conductor.mjs` 已接入）：页面内传输经 `Runtime.addBinding('__xtHostHttp')` 交给 Node，由同源 helper 标签页执行 `fetch`（同源→无 CORS、自动带 cookie）。实测「口腔种植学」两个真实未完成讨论任务点（绪论 1205366375 / 术前临床检查 1205367149）：脚本自身 F45 路径完整跑通，桥轨迹为 `GET …/replysList → 200`、`POST …/addReplys → 200 {"msg":"回复发表成功"}`，任务点变为 `ans-job-finished`，课程进度 **53/55 → 55/55** |

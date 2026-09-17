@@ -523,6 +523,7 @@ await test('A8 README 默认配置与运行中的 app.configs 逐项一致', asy
     if (raw === 'true') return true;
     if (raw === 'false') return false;
     if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+      if (/^\[.*\]$/.test(raw)) { try { return JSON.parse(raw.replace(/'/g, '"')); } catch (e) { /* 落回字符串比较 */ } }
     return raw.replace(/^['"]|['"]$/g, '');
   };
   const mismatches = [];
