@@ -3329,6 +3329,59 @@ test('F79-4 完成判定：全部下拉框选中才算已作答（未选不计�
 });
 
 // ---------------------------------------------------------------------------
+// F80：填空的 iframe 编辑器（上游 cx.ts:1932-1944）——此前只有 UEditor 路径
+// ---------------------------------------------------------------------------
+
+/** 造一个填空题：textarea + 紧随其后的 iframe 编辑器 */
+async function fillQuizFrame(env, opts = {}) {
+    const withFrame = opts.withFrame !== false;
+    const html = '<div class="TiMu">'
+        + '<div class="newZy_TItle">填空题</div>'
+        + '<div class="Zy_TItle">请填写答案</div>'
+        + '<div class="Zy_ulTk"><ul><li>'
+        + '<textarea id="answer11"></textarea>'
+        + (withFrame ? '<iframe src="about:blank"></iframe>' : '')
+        + '</li></ul></div>'
+        + '</div>';
+    await writeFrame(env, 'work', html);
+    return frameDoc(env, 'work');
+}
+
+test('F80-1 填空的 iframe 编辑器可被填入，且完成判定能读到（联动缺口已闭合）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="work" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const doc = await fillQuizFrame(env);
+    const list = app._workQuestionList(doc);
+    check('F80-1 解析出 1 道题且判为写作/填空类', list.length === 1 && list[0].isShortAnswer === true,
+        JSON.stringify({ len: list.length, short: list[0] && list[0].isShortAnswer }));
+    const q = list[0];
+    const quiz = { win: env.window, doc: doc };
+
+    check('F80-1 未填时完成判定为 0', app._workHasAnswer(quiz, [q]) === 0, String(app._workHasAnswer(quiz, [q])));
+
+    const ok = app._fillWorkAnswer(env.window, q, '这是填空答案');
+    check('F80-1 无 UEditor 时也能填入（走 iframe 路径）', ok === true, String(ok));
+
+    // 关键联动：填进去之后判定必须能读到 —— 否则会「填了却判未作答」→ 上锁拒绝提交
+    const filled = app._workHasAnswer(quiz, [q]);
+    check('F80-1 填入后完成判定能读到 iframe 内容', filled === 1, 'filled=' + filled);
+    app.destroy();
+});
+
+test('F80-2 无 iframe 的普通填空题：直接写 textarea 同样成功', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="work" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const doc = await fillQuizFrame(env, { withFrame: false });
+    const q = app._workQuestionList(doc)[0];
+    const quiz = { win: env.window, doc: doc };
+    const ok = app._fillWorkAnswer(env.window, q, '普通填空');
+    check('F80-2 无 iframe 时写入 textarea 成功', ok === true, String(ok));
+    check('F80-2 textarea 值已写入', String(q.textarea.value) === '普通填空', JSON.stringify(q.textarea.value));
+    check('F80-2 完成判定为 1', app._workHasAnswer(quiz, [q]) === 1, String(app._workHasAnswer(quiz, [q])));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
 // 运行入口
 // ---------------------------------------------------------------------------
 

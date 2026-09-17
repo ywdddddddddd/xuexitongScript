@@ -5324,22 +5324,85 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             },
             _fillWorkAnswer(quizWin, question, text) {
                 const ue = quizWin && quizWin.UE;
-                if (!ue || !ue.instants) return false;
                 const wantKey = 'answer' + question.answerId;
-                let editor = null;
-                for (const key of Object.keys(ue.instants)) {
-                    const candidate = ue.instants[key];
-                    if (candidate && candidate.textarea && String(candidate.textarea.id) === wantKey) { editor = candidate; break; }
+                const body = '<p>' + String(text == null ? '' : text).replace(/[<>]/g, '') + '</p>';
+                // 路径 1：UEditor（平台主流填空形态）
+                if (ue && ue.instants) {
+                    let editor = null;
+                    for (const key of Object.keys(ue.instants)) {
+                        const candidate = ue.instants[key];
+                        if (candidate && candidate.textarea && String(candidate.textarea.id) === wantKey) { editor = candidate; break; }
+                    }
+                    if (!editor) editor = ue.instants[wantKey] || null;
+                    if (editor && editor.body) {
+                        try {
+                            editor.body.innerHTML = body;
+                            if (typeof editor.sync === 'function') editor.sync();
+                            // 关键：页面提交时按 answer<id> 键查找实例，未注册会导致其内部 try/catch 静默失败（真机演练实证）。
+                            if (!ue.instants[wantKey]) ue.instants[wantKey] = editor;
+                            return true;
+                        } catch (e) { /* 落到下面的 iframe / textarea 路径 */ }
+                    }
                 }
-                if (!editor) editor = ue.instants[wantKey] || null;
-                if (!editor || !editor.body) return false;
+                // 路径 2：F80（V3.7）填空的 iframe 编辑器 —— 上游 cx.ts:1932-1944 同时写 textarea.value
+                // 与 textareaFrame.contentDocument.body.innerHTML，并点 [onclick*=saveQuestion]。
+                // 本地此前只处理 UEditor：没有 UE 的页面 → 返回 false → 有效作答不足 → 上锁拒绝提交。
+                // 注意：定位 iframe 必须按 answerId 找**同一个填空区域**，
+                //       不能改成「题目内任意 iframe」——选项过滤器(F18) 正是靠「li 内含 iframe」来排除编辑器外壳的。
+                let scopes = [];
                 try {
-                    editor.body.innerHTML = '<p>' + String(text == null ? '' : text).replace(/[<>]/g, '') + '</p>';
-                    if (typeof editor.sync === 'function') editor.sync();
-                    // 关键：页面提交时按 answer<id> 键查找实例，未注册会导致其内部 try/catch 静默失败（真机演练实证）。
-                    if (!ue.instants[wantKey]) ue.instants[wantKey] = editor;
-                    return true;
-                } catch (e) { return false; }
+                    const root = (question && question.textarea && question.textarea.ownerDocument) || document;
+                    if (question && question.answerId) {
+                        scopes.push(root.getElementById('answer' + question.answerId));
+                        const byAttr = root.querySelector('[name="answer' + question.answerId + '"]');
+                        if (byAttr) scopes.push(byAttr);
+                    }
+                    if (question && question.textarea) scopes.push(question.textarea);
+                } catch (e) { scopes = []; }
+                for (const scope of scopes) {
+                    if (!scope) continue;
+                    // 填空的 iframe 编辑器通常挂在 textarea 之后（上游就是 textareaFrame）
+                    let frame = null;
+                    try {
+                        const holder = scope.parentElement || scope.parentNode;
+                        frame = (holder && holder.querySelector) ? holder.querySelector('iframe') : null;
+                        if (!frame && scope.nextElementSibling && scope.nextElementSibling.tagName === 'IFRAME') frame = scope.nextElementSibling;
+                    } catch (e) { frame = null; }
+                    if (!frame) continue;
+                    try {
+                        const fdoc = frame.contentDocument;
+                        if (fdoc && fdoc.body) {
+                            fdoc.body.innerHTML = String(text == null ? '' : text).replace(/</g, '&lt;');
+                            // 无 UEditor 时没有 editor.sync() 等价物 —— 手动派发事件让平台读到值
+                            try { fdoc.body.dispatchEvent(new Event('input', { bubbles: true })); } catch (e2) { /* ignore */ }
+                            try { fdoc.body.dispatchEvent(new Event('change', { bubbles: true })); } catch (e2) { /* ignore */ }
+                            if (question.textarea) {
+                                try {
+                                    question.textarea.value = String(text == null ? '' : text);
+                                    question.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                                    question.textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                                } catch (e2) { /* ignore */ }
+                            }
+                            // 存在保存按钮则点一下（上游 cx.ts:1943 同款）
+                            try {
+                                const box = (scope.parentElement && scope.parentElement.parentElement) || scope.parentElement;
+                                const save = box && box.querySelector ? box.querySelector('[onclick*=saveQuestion]') : null;
+                                if (save && save.click) save.click();
+                            } catch (e2) { /* ignore */ }
+                            return true;
+                        }
+                    } catch (e) { /* 跨域或无 body，尝试下一个 */ }
+                }
+                // 路径 3：普通 textarea（非编辑器）—— 直接写值并派发事件
+                if (question && question.textarea) {
+                    try {
+                        question.textarea.value = String(text == null ? '' : text);
+                        question.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                        question.textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    } catch (e) { /* ignore */ }
+                }
+                return false;
             },
             // F19：题目合格性预检——给 AI 发请求/提交前，先排除明显不合格的「题目」（界面文案、过短、选项不足等）。
             _isQuestionSane(questionText, question) {
@@ -5485,6 +5548,21 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             }
                             if (ed && typeof ed.getContent === 'function') text = ed.getContent();
                             else if (q.textarea) text = q.textarea.value;
+                            // F80（V3.7）：填空的 iframe 编辑器 —— 值在 iframe 的 body 里，
+                            // 不读它会出现「填了但判定未作答」→ 上锁拒绝提交（上游同类联动缺口）。
+                            if (!String(text || '').replace(/<[^>]*>/g, '').trim()) {
+                                let frame = null;
+                                try {
+                                    const holder = q.textarea ? (q.textarea.parentElement || q.textarea.parentNode) : null;
+                                    frame = (holder && holder.querySelector) ? holder.querySelector('iframe') : null;
+                                } catch (e2) { frame = null; }
+                                if (frame) {
+                                    try {
+                                        const fdoc = frame.contentDocument;
+                                        if (fdoc && fdoc.body) text = fdoc.body.innerHTML || fdoc.body.textContent || '';
+                                    } catch (e2) { /* 跨域读不到，按未作答处理 */ }
+                                }
+                            }
                         } catch (e) { text = ''; }
                         if (String(text || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0) filled++;
                     } else {
