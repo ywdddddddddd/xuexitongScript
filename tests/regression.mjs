@@ -3382,6 +3382,53 @@ test('F80-2 无 iframe 的普通填空题：直接写 textarea 同样成功', as
 });
 
 // ---------------------------------------------------------------------------
+// F81：可选「随机兜底作答」——默认关闭；开启后仍不得污染题库缓存
+// ---------------------------------------------------------------------------
+
+test('F81 随机兜底：默认关闭；开启后能选中一个选项且标注不确定', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
+    const app = await env.boot();
+    check('F81 默认 randomFallbackOnUncertain=false（保持"不确定就不作答"）',
+        app.configs.randomFallbackOnUncertain === false, 'value=' + app.configs.randomFallbackOnUncertain);
+
+    // 造两个可点击的选项
+    const doc = env.window.document;
+    doc.body.insertAdjacentHTML('beforeend',
+        '<ul id="optBox"><li class="ans-opt"><span>A 甲</span></li><li class="ans-opt"><span>B 乙</span></li></ul>');
+    const lis = Array.from(doc.querySelectorAll('#optBox li'));
+    const clicks = [];
+    lis.forEach((li, i) => li.addEventListener('click', () => {
+        clicks.push(i);
+        li.className = 'ans-opt cur';   // 模拟平台点击后置选中类
+    }));
+    const options = lis.map((li, i) => ({ el: li, letter: String.fromCharCode(65 + i), text: li.textContent }));
+
+    let picked = null;
+    let tail = null;
+    app._randomPickOne(options, (p, t) => { picked = p; tail = t; });
+    check('F81 随机兜底能选中一个选项', !!picked && !!picked.el, JSON.stringify(picked && picked.letter));
+    check('F81 点击确实生效（选项被标记选中）',
+        clicks.length >= 1 && lis.some((li) => /(^|\s)cur(\s|$)/.test(li.className)),
+        'clicks=' + JSON.stringify(clicks));
+    check('F81 无异常尾部信息', tail === '' || tail === null, JSON.stringify(tail));
+
+    // 安全边界：随机答案绝不能进题库缓存（否则会被当成"正确答案"复用）
+    app._qcacheData = Object.create(null);
+    app._answerCache = new Map();
+    app.configs.randomFallbackOnUncertain = true;
+    let picked2 = null;
+    app._randomPickOne(options, (p) => { picked2 = p; });
+    check('F81 兜底本身不写缓存（写入由调用方在"平台确认"后才做）',
+        Object.keys(app._qcacheData || {}).length === 0, 'cache=' + Object.keys(app._qcacheData || {}).length);
+    check('F81 空选项集合时不炸（返回 null + 原因）', (() => {
+        let r = 'init';
+        app._randomPickOne([], (p, t) => { r = t; });
+        return r === 'no-options';
+    })(), '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
 // 运行入口
 // ---------------------------------------------------------------------------
 

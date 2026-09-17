@@ -141,6 +141,7 @@ llmEmbeddedWork: false
 llmWorkWaitMs: 90000
 llmAnswerSeparators: '===,#,---,###,|,;,；,、'
 workDraftOnUncertain: true
+randomFallbackOnUncertain: false
 breakingModeGuard: true
 breakingModeStuckThreshold: 3
 questionCacheEnabled: true

@@ -248,6 +248,12 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 // 未全部作答）都先调用平台原生「暂时保存」(noSubmit) 存草稿，再停止等人工确认。
                 // 目的：既不在信息不足时把错误答案提交入库，也不让已填内容白丢。
                 workDraftOnUncertain: true,
+                // F81（V3.7）：可选「随机兜底作答」。**默认关闭** —— 保持本项目「不确定就不作答」的安全策略。
+                // 开启后：LLM 无法作答的题随机选一个选项，让整份作业能继续而不是卡住；
+                // 该题会被标注为不确定且**不写入题库缓存**（绝不把随机答案当正确答案复用）。
+                // 与上游的关系：上游 cx.ts:2003-2045 默认就带随机兜底（保证不卡住），本项目默认不带（保证不产出可疑答案）。
+                // 这是两种取向，故做成显式开关而不是二选一。
+                randomFallbackOnUncertain: false,
                 // F70（V3.7）：闯关/解锁模式识别与卡死计数兜底（移植上游 cx.ts:1087-1114，调用点 cx.ts:1346-1351）。
                 // 平台用 .catalog_points_sa / .catalog_points_er 标记闯关（小旗帜图标）与解锁模式：这类课程必须按序解锁，
                 // 卡在「章节测验未完成」时会反复回到同一节点却推不动。开启后：同一节点进入次数达到 breakingModeStuckThreshold
@@ -5644,8 +5650,31 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     return false;
                 }
             },
-            _askLineAnswer(questionText, question, cb) {
-                // F79：连线题的 LLM 提问 —— 把左右两栏的可见文本交给模型，要求按「左栏顺序」返回配对的右栏文本。
+            _randomPickOne(options, cb) {
+                // F81（V3.7）：随机兜底的一个选项。移植上游 cx.ts:2003-2045 的 randomWork-choice 语义，
+                // 但明确标注为「不确定」——调用方必须把该题排除在题库缓存之外，绝不冒充正确作答。
+                const done = typeof cb === 'function' ? cb : function () { };
+                try {
+                    const list = (options || []).filter((o) => o && o.el);
+                    if (!list.length) { done(null, 'no-options'); return; }
+                    const pick = list[Math.floor(Math.random() * list.length)];
+                    let clicked = false;
+                    try {
+                        const targets = this._optionClickTargets ? this._optionClickTargets(pick.el) : [pick.el];
+                        for (const t of targets) {
+                            try { if (t && t.click) { t.click(); clicked = true; } } catch (e2) { /* 试下一个层级 */ }
+                            // 点中即停：多选场景下继续点会把 checkbox 点两下抵消（F55 的教训）
+                            let selected = false;
+                            try { selected = this._optionLooksSelected ? this._optionLooksSelected(pick.el) : false; } catch (e2) { selected = false; }
+                            if (selected) break;
+                        }
+                    } catch (e) { clicked = false; }
+                    done(pick, clicked ? '' : '点击未生效');
+                } catch (e) {
+                    done(null, String((e && e.message) || e));
+                }
+            },
+            _askLineAnswer(questionText, question, cb) {                // F79：连线题的 LLM 提问 —— 把左右两栏的可见文本交给模型，要求按「左栏顺序」返回配对的右栏文本。
                 const done = typeof cb === 'function' ? cb : function () { };
                 let leftText = '';
                 let optionsText = '';
@@ -6012,6 +6041,19 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                         + ' ｜ answer=' + JSON.stringify(String((result && result.answer) || '').slice(0, 40))
                                         + ' ｜ llmRaw=' + JSON.stringify(String((result && result.raw) || '').slice(0, 140))
                                         + ' ｜ options=' + options.map((o) => o.letter + ':' + String(o.text || '').slice(0, 16)).join(' | '), 'color:#FF9800');
+                                    // F81（V3.7）：可选随机兜底 —— 默认关闭（保持"不确定就不作答"的安全策略）。
+                                    // 开启后：该题随机选一个选项，让整份作业能继续，而不是卡在这一题。
+                                    // 绝不伪装成正确：日志与计数都标注「随机」，且该题不进题库缓存（见下方不 push answered）。
+                                    if (this.configs.randomFallbackOnUncertain === true && options.length) {
+                                        this._randomPickOne(options, (picked, tail) => {
+                                            console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题启用随机兜底（randomFallbackOnUncertain=true）：'
+                                                + '随机选择 ' + picked.letter + '，该题判为不确定、不写入题库缓存', 'color:#FF9800');
+                                            if (tail) console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题：剩余未作答选项在随机兜底下仍按原诊断（'
+                                                + String(tail).slice(0, 60) + '）', 'color:#607D8B');
+                                            this._schedule(() => askNext(qi + 1), 400);
+                                        });
+                                        return;
+                                    }
                                     giveUp('第 ' + (qi + 1) + ' 题无法匹配选项');
                                     return;
                                 }
