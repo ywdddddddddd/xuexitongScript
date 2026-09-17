@@ -221,6 +221,10 @@
                 llmEmbeddedWork: false,
                 // 提交后任务点标记可能延迟（待批阅），窗口放宽到 90s（真机演练实证）。
                 llmWorkWaitMs: 90000,
+                // F79（V3.7）：连线题答案的分隔符（LLM 可能用 #、|、分号、顿号等分隔多个空的配对）。
+                // 注意：这里用半角逗号分隔**配置项**，所以答案分隔符本身不能含半角逗号 ——
+                // 用一个不含逗号的完整列表，落到代码里再补上半角逗号与全角逗号。
+                llmAnswerSeparators: '===,#,---,###,|,;,；,、',
                 // F48（V3.6）：不确定时"只暂存不提交"——作答链任何失败/上锁（题目校验未通过、选项匹配失败、
                 // 未全部作答）都先调用平台原生「暂时保存」(noSubmit) 存草稿，再停止等人工确认。
                 // 目的：既不在信息不足时把错误答案提交入库，也不让已填内容白丢。
@@ -304,6 +308,9 @@
             _timereaderWaitMs: 0,
             _timereaderTimerId: null,
             _hyperlinkBusy: false,
+            _hyperlinkEl: null,
+            _hyperlinkWaitLeft: 0,
+            _hyperlinkTimerId: null,
             _llmAnswersThisSession: 0,
             _llmLastAnswer: null,
             _llmLastQuestionKey: '',
@@ -372,6 +379,9 @@
                 this._timereaderWaitMs = 0;
                 this._timereaderTimerId = null;
                 this._hyperlinkBusy = false;
+                this._hyperlinkEl = null;
+                this._hyperlinkWaitLeft = 0;
+                this._hyperlinkTimerId = null;
                 this._qcacheLoad();
                 this._llmChapterSuggesting = false;
                 this._llmChapterSuggestDone = false;this._llmChapterSuggestDone = false;
@@ -1659,10 +1669,22 @@
                 const hit = this._findHyperlinkTask();
                 if (!hit || !hit.el) return false;
                 if (this._holderFinished(hit.el)) return false;      // 已完成 → 交回既有流程
-                if (this._hyperlinkBusy) return true;                 // 重入幂等：本次点击的确认等待已在进行
                 const el = hit.el;
                 const win = this._docDefaultView(hit.doc);
+                if (this._hyperlinkBusy) {
+                    // F75 重入幂等（与 F74 同一手法）：本次点击的确认等待已在进行。
+                    // _clearTimers()（run()/人脸等待）会打断自链，因此这里只把自链重新挂上 ——
+                    // 既不重复点击（点击是一次性动作，重放会重复触发页面弹窗），也不重置剩余等待轮数。
+                    const alive = this._hyperlinkTimerId && this._timers && this._timers.has(this._hyperlinkTimerId);
+                    if (!alive) {
+                        this._hyperlinkTimerId = this._schedule(() => this._hyperlinkTick(), 2000);
+                        console.log('%c[链接任务点] 确认等待被中断，已重新挂上监听（不重复点击）', 'color:#607D8B');
+                    }
+                    return true;
+                }
                 this._hyperlinkBusy = true;
+                this._hyperlinkEl = el;
+                this._hyperlinkWaitLeft = Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 45000) / 2000));
                 this._isPlaying = false;
                 this._clearCheckInterval();
                 // 上游只把 onclick 属性换成返回 false 的函数；这**拦不住 addEventListener 注册的监听器**
@@ -1705,32 +1727,40 @@
                     }
                 }
                 // 完成后必须确认平台标记（与文档任务同一范式，窗口沿用 docTaskWaitMs）：确认不了就走安全停止，绝不硬推进。
-                const left = Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 45000) / 2000));
-                const wait = (n) => {
-                    if (this._holderFinished(el)) {
-                        this._hyperlinkBusy = false;
-                        console.log('%c[链接任务点] 平台已标记该任务点完成，继续推进', 'color:#4CAF50');
-                        this._schedule(() => this.play(), 1500);
-                        return;
-                    }
-                    const tp = this._countUnfinishedTaskPoints();
-                    if (tp && tp.total > 0 && tp.unfinished === 0) {
-                        this._hyperlinkBusy = false;
-                        console.log('%c[链接任务点] 全部任务点均已标记完成，继续推进', 'color:#4CAF50');
-                        this._schedule(() => this.play(), 1500);
-                        return;
-                    }
-                    if (n <= 0) {
-                        this._hyperlinkBusy = false;
-                        console.warn('%c[链接任务点] 点击后平台未标记该任务点完成（未完成 ' + (tp ? tp.unfinished + '/' + tp.total : '未知')
-                            + '）→ 安全停止，请人工确认（该链接可能需要登录或完成额外步骤）', 'color:#FF9800');
-                        this._releaseNavLock('链接任务点未确认完成');
-                        return;
-                    }
-                    this._schedule(() => wait(n - 1), 2000);
-                };
-                this._schedule(() => wait(left), 1500);
+                // 等待用实例方法 + 实例字段承载（而非闭包），这样 _clearTimers() 打断自链后能被重入路径重新挂上（见上面的重入分支）。
+                this._hyperlinkTimerId = this._schedule(() => this._hyperlinkTick(), 1500);
                 return true;
+            },
+            _hyperlinkTick() {
+                this._hyperlinkTimerId = null;
+                if (!this._hyperlinkBusy) return;                    // 已被切节点/run()/destroy() 中止
+                const el = this._hyperlinkEl;
+                if (el && this._holderFinished(el)) {
+                    this._hyperlinkBusy = false;
+                    this._hyperlinkEl = null;
+                    console.log('%c[链接任务点] 平台已标记该任务点完成，继续推进', 'color:#4CAF50');
+                    this._schedule(() => this.play(), 1500);
+                    return;
+                }
+                const tp = this._countUnfinishedTaskPoints();
+                if (tp && tp.total > 0 && tp.unfinished === 0) {
+                    this._hyperlinkBusy = false;
+                    this._hyperlinkEl = null;
+                    console.log('%c[链接任务点] 全部任务点均已标记完成，继续推进', 'color:#4CAF50');
+                    this._schedule(() => this.play(), 1500);
+                    return;
+                }
+                if (this._hyperlinkWaitLeft <= 0) {
+                    this._hyperlinkBusy = false;
+                    this._hyperlinkEl = null;
+                    // 确认不了平台标记 → 安全停止（绝不硬推进到下一节）
+                    console.warn('%c[链接任务点] 点击后平台未标记该任务点完成（未完成 ' + (tp ? tp.unfinished + '/' + tp.total : '未知')
+                        + '）→ 安全停止，请人工确认（该链接可能需要登录或完成额外步骤）', 'color:#FF9800');
+                    this._releaseNavLock('链接任务点未确认完成');
+                    return;
+                }
+                this._hyperlinkWaitLeft--;
+                this._hyperlinkTimerId = this._schedule(() => this._hyperlinkTick(), 2000);
             },
             _handleNoVideoNode() {
                 // 用户 2026-09-17：问卷识别**不依赖任务点标记** —— 进入节点先看一眼内容区是不是问卷。
@@ -2681,6 +2711,9 @@
                 this._timereaderWaitMs = 0;
                 this._timereaderTimerId = null;
                 this._hyperlinkBusy = false;
+                this._hyperlinkEl = null;
+                this._hyperlinkWaitLeft = 0;
+                this._hyperlinkTimerId = null;
                 if (this._guardProbeTimer) {
                     this._cancelTimer(this._guardProbeTimer);
                     this._guardProbeTimer = null;
@@ -5214,11 +5247,22 @@
                             return { el: li, text: t };
                         });
                     } catch (e) { optionEls = []; }
+                    // F79（V3.7）：连线题（题型 11）。平台上是一个/多个 <select>（.thirdUlList .dept_select），
+                    // 不是普通选项 —— 原先 optionEls 为空 → 被 5220 行误判为写作题 → 去填编辑器 → 填不上
+                    // → 有效作答不足 → 上锁拒绝提交（整份作业停住）。
+                    // 上游依据：cx.ts:1885（lineSelectBox: '.thirdUlList .dept_select'）、cx.ts:1954-1985（逐框 select）。
+                    let lineSelects = [];
+                    try {
+                        lineSelects = Array.from(timu.querySelectorAll('.thirdUlList .dept_select select, .thirdUlList select, .dept_select select'))
+                            .filter((s) => s && s.options && s.options.length > 1);
+                    } catch (e) { lineSelects = []; }
+                    const isLineQuestion = lineSelects.length > 0 || String(typeCode) === '11';
                     let editorCount = 0;
                     try { editorCount = timu.querySelectorAll('.edui-editor').length; } catch (e) { editorCount = 0; }
                     // F18：过滤后没有真选项 → 一律按写作题处理（不再依赖题型标签，覆盖案例/讨论/资料等所有变体）。
-                    const isShortAnswer = optionEls.length === 0 || /简答|论述|分析|写作|资料|案例|讨论/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0;
-                    out.push({ typeLabel: typeLabel, typeCode: typeCode, rawText: rawText, answerId: answerId, textarea: textarea, isShortAnswer: isShortAnswer, optionEls: optionEls, editorCount: editorCount });
+                    // F79：连线题优先豁免 —— 它本来就没有 optionEls，不能被判成写作题。
+                    const isShortAnswer = !isLineQuestion && (optionEls.length === 0 || /简答|论述|分析|写作|资料|案例|讨论/.test(typeLabel) || ['4', '5', '18', '26'].indexOf(typeCode) >= 0);
+                    out.push({ typeLabel: typeLabel, typeCode: typeCode, rawText: rawText, answerId: answerId, textarea: textarea, isShortAnswer: isShortAnswer, optionEls: optionEls, editorCount: editorCount, isLineQuestion: isLineQuestion, lineSelects: lineSelects });
                 });
                 return out;
             },
@@ -5394,6 +5438,19 @@
             _workHasAnswer(quiz, questions) {
                 let filled = 0;
                 for (const q of questions) {
+                    // F79（V3.7）：连线题的「已作答」判据是「每个下拉框都选中过某一项」（非占位项）。
+                    if (q.isLineQuestion) {
+                        let ok = false;
+                        try {
+                            const sels = q.lineSelects || [];
+                            ok = sels.length > 0 && sels.every((s) => {
+                                const v = String(s.value == null ? '' : s.value);
+                                return v !== '' && v !== '-1' && v !== '0';
+                            });
+                        } catch (e) { ok = false; }
+                        if (ok) filled++;
+                        continue;
+                    }
                     if (q.isShortAnswer) {
                         let text = '';
                         try {
@@ -5435,6 +5492,94 @@
                     }
                 }
                 return filled;
+            },
+            _applyLineAnswer(question, answer) {
+                // F79（V3.7）：把 LLM 给出的配对落到连线的下拉框上。
+                // 对齐上游 cx.ts:1954-1985 的两个关键约束：
+                //   1) 答案分段数必须与下拉框数一致（长度不等就不作答，避免错位配对）；
+                //   2) 同时改 <option selected> 与可视文本（chosen.js 之类会只显示可视文本，不显示选中值）。
+                try {
+                    const selects = (question && question.lineSelects) || [];
+                    if (!selects.length) return false;
+                    // 先解析分隔符列表（默认覆盖常见中英文分隔符；可用 llmAnswerSeparators 覆盖）
+                    let seps = String(this.configs.llmAnswerSeparators || '').split(',').map((s) => s.trim()).filter(Boolean);
+                    // 半角逗号与全角逗号不能在配置字符串里直接写（配置本身用半角逗号分隔），这里补上；
+                    // 顿号在中文里最自然，也一并补，避免 LLM 用顿号时解析失败。
+                    for (const extra of [',', '，', '、']) if (seps.indexOf(extra) < 0) seps.push(extra);
+                    if (!seps.length) seps = ['===', '#', '---', '###', '|', ';', '；'];
+                    let parts = [];
+                    const raw = String(answer == null ? '' : answer).trim();
+                    // 优先 JSON 数组（LLM 在 json 模式下更可能返回数组）
+                    try {
+                        const json = JSON.parse(raw);
+                        if (Array.isArray(json)) parts = json.map((x) => String(x).trim()).filter(Boolean);
+                    } catch (e) { /* 落回分隔符切分 */ }
+                    if (!parts.length) {
+                        for (const sep of seps) {
+                            if (raw.split(sep).length > 1) { parts = raw.split(sep).map((s) => s.trim()).filter(Boolean); break; }
+                        }
+                    }
+                    if (!parts.length) parts = [raw];
+                    if (parts.length !== selects.length) return false;   // 长度不等 → 宁可失败上锁，也不错位配对
+
+                    let changed = 0;
+                    for (let i = 0; i < selects.length; i++) {
+                        const sel = selects[i];
+                        const want = parts[i];
+                        let opt = null;
+                        try {
+                            opt = Array.from(sel.options).find((o) => String(o.value) === want || String(o.textContent || '').trim() === want);
+                        } catch (e) { opt = null; }
+                        if (!opt) return false;                          // 有一项对不上就整体失败（不半填）
+                        try {
+                            sel.value = opt.value;
+                            sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            changed++;
+                        } catch (e) { return false; }
+                        // 同步可视文本（部分皮肤用 chosen 之类的替身显示）
+                        try {
+                            const shown = sel.parentElement && sel.parentElement.querySelector('.chosen-single span');
+                            if (shown) shown.textContent = String(opt.textContent || '').trim();
+                        } catch (e) { /* 皮肤差异，忽略 */ }
+                    }
+                    return changed === selects.length;
+                } catch (e) {
+                    return false;
+                }
+            },
+            _askLineAnswer(questionText, question, cb) {
+                // F79：连线题的 LLM 提问 —— 把左右两栏的可见文本交给模型，要求按「左栏顺序」返回配对的右栏文本。
+                const done = typeof cb === 'function' ? cb : function () { };
+                let leftText = '';
+                let optionsText = '';
+                try {
+                    leftText = String((question && question.rawText) || questionText || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+                } catch (e) { leftText = String(questionText || ''); }
+                try {
+                    const selects = (question && question.lineSelects) || [];
+                    const rows = [];
+                    for (let i = 0; i < selects.length; i++) {
+                        const vals = Array.from(selects[i].options)
+                            .map((o) => String(o.textContent || '').replace(/\s+/g, ' ').trim())
+                            .filter((t) => t && t !== '请选择' && t !== '-请选择-' && t !== '---');
+                        rows.push('第' + (i + 1) + '空可选项：' + vals.slice(0, 12).join(' / '));
+                    }
+                    optionsText = rows.join('\n');
+                } catch (e) { optionsText = ''; }
+                if (!optionsText) { done(new Error('未取到连线题的可选项'), null); return; }
+                const prompt = '连线题（把左栏与右栏配对）。题目与左栏：' + leftText + '\n' + optionsText
+                    + '\n请按「第1空,第2空,…」的顺序给出每一空应选的右栏文本，用逗号分隔，不要输出其它内容。';
+                this._llmRequest(
+                    this._llmBuildPayload(this._llmBuildShortMessages(prompt)),
+                    (content) => {
+                        const text = this._llmExtractFreeText(content);
+                        const flat = String(text || '').trim();
+                        if (!flat) { done(new Error('LLM 未给出配对'), null); return; }
+                        this._answerCacheSet(questionText, 'line', flat);
+                        done(null, flat);
+                    },
+                    (err) => done(err || new Error('LLM 请求失败'), null),
+                );
             },
             _workLooksSubmitted(work) {
                 // 任务点标记可能延迟：工作页出现「待批阅/已完成/已提交」也算提交成功（真机演练：待批阅 + ans-job-finished 延迟）。
@@ -5682,6 +5827,33 @@
                                     giveUp('题干仍含 ' + unresolved.length + ' 个未解出的混淆字（' + unresolved.slice(0, 10).join('') + '），判为不确定 → 只暂存不提交');
                                     return;
                                 }
+                            }
+                            if (q.isLineQuestion) {
+                                // F79（V3.7）：连线题逐步作答 —— 先查缓存，未命中再由 LLM 按「左→右」顺序给出配对。
+                                const cachedLine = this._answerCacheGet(questionText);
+                                if (cachedLine && cachedLine.kind === 'line') {
+                                    const okCached = this._applyLineAnswer(q, cachedLine.answer);
+                                    if (okCached) {
+                                        console.log('%c[缓存] 第 ' + (qi + 1) + ' 题命中答案缓存（连线题）', 'color:#10B981');
+                                        answered.push({ questionText: questionText, kind: 'line', answer: cachedLine.answer });
+                                        askNext(qi + 1);
+                                        return;
+                                    }
+                                }
+                                this._askLineAnswer(questionText, q, (err, answer) => {
+                                    if (err || !answer) {
+                                        this._lockWork('第 ' + (qi + 1) + ' 题（连线题）未取得可用答案');
+                                        giveUp('第 ' + (qi + 1) + ' 题（连线题）' + (err ? '请求失败：' + err.message : 'LLM 未给出配对'));
+                                        return;
+                                    }
+                                    const ok = this._applyLineAnswer(q, answer);
+                                    console.log('%c[LLM] 第 ' + (qi + 1) + ' 题（连线题）' + (ok ? '已选择配对' : '配对应用失败') + '：' + String(answer).slice(0, 60),
+                                        ok ? 'color:#9C27B0' : 'color:#FF9800');
+                                    if (!ok) { this._lockWork('第 ' + (qi + 1) + ' 题（连线题）配对应用失败'); giveUp('第 ' + (qi + 1) + ' 题（连线题）配对应用失败'); return; }
+                                    answered.push({ questionText: questionText, kind: 'line', answer: answer });
+                                    askNext(qi + 1);
+                                });
+                                return;
                             }
                             if (q.isShortAnswer) {
                                 const cachedShort = this._answerCacheGet(questionText);
@@ -6294,6 +6466,9 @@
                 this._timereaderWaitMs = 0;
                 this._timereaderTimerId = null;
                 this._hyperlinkBusy = false;
+                this._hyperlinkEl = null;
+                this._hyperlinkWaitLeft = 0;
+                this._hyperlinkTimerId = null;
                 console.log('%c脚本已停止（destroy）：定时器、视频事件与页面监听均已清理。', 'color:#607D8B');
             },
         };

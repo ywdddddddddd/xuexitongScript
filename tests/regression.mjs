@@ -3235,6 +3235,100 @@ test('F78 提交闸门：默认关闭且放行条件是「完成率达标 且 �
 });
 
 // ---------------------------------------------------------------------------
+// F79：连线题（题型 11）——识别、作答、长度不符即拒绝、完成判定
+// 上游依据：cx.ts:1885（.thirdUlList .dept_select）、cx.ts:1954-1985（逐框 select，长度须相等）
+// ---------------------------------------------------------------------------
+
+/** 造一个连线题帧：一个 .TiMu，内含 .thirdUlList .dept_select > select */
+async function lineQuizFrame(env, opts = {}) {
+    const optsA = (opts.a || ['甲', '乙', '丙']);
+    const optsB = (opts.b || ['一', '二', '三']);
+    const mkSelect = (list) => '<select class="dept_select_sel">'
+        + '<option value="0">请选择</option>'
+        + list.map((t, i) => '<option value="' + (i + 1) + '">' + t + '</option>').join('')
+        + '</select>';
+    const count = opts.count == null ? 2 : opts.count;
+    const selects = [];
+    for (let i = 0; i < count; i++) selects.push(mkSelect(i === 0 ? optsA : optsB));
+    const html = '<div class="TiMu">'
+        + '<div class="newZy_TItle">连线题</div>'
+        + '<div class="Zy_TItle">请将左栏与右栏配对</div>'
+        + '<div class="thirdUlList"><div class="dept_select">' + selects.join('') + '</div></div>'
+        + '</div>';
+    await writeFrame(env, 'work', html);
+    return frameDoc(env, 'work');
+}
+
+test('F79-1 连线题被识别为 line（不再被误判为写作题）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="work" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const doc = await lineQuizFrame(env);
+    const list = app._workQuestionList(doc);
+    check('F79-1 解析出 1 道题', list.length === 1, 'len=' + list.length);
+    const q = list[0];
+    check('F79-1 判为连线题（isLineQuestion）', q.isLineQuestion === true, JSON.stringify({ isLine: q.isLineQuestion, code: q.typeCode }));
+    check('F79-1 不再被判为写作题（否则会去填编辑器并上锁）', q.isShortAnswer === false, 'isShortAnswer=' + q.isShortAnswer);
+    check('F79-1 收集到 2 个连线下拉框', (q.lineSelects || []).length === 2, 'n=' + (q.lineSelects || []).length);
+    app.destroy();
+});
+
+test('F79-2 配对长度与下拉框数一致时才应用；不等则拒绝（绝不错位配对）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="work" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const doc = await lineQuizFrame(env);
+    const q = app._workQuestionList(doc)[0];
+
+    // 长度不符（1 段 vs 2 框）→ 必须失败，且不得改动任何下拉框
+    const bad = app._applyLineAnswer(q, '甲');
+    check('F79-2 段数与下拉框数不等 → 拒绝作答', bad === false, String(bad));
+    check('F79-2 拒绝时下拉框保持未选',
+        q.lineSelects.every((s) => String(s.value) === '0'), JSON.stringify(q.lineSelects.map((s) => s.value)));
+
+    // 长度相符但有一项对不上 → 整体失败（不半填）
+    const halfBad = app._applyLineAnswer(q, '甲,不存在的选项');
+    check('F79-2 任一项匹配不上 → 整体拒绝（不半填）', halfBad === false, String(halfBad));
+
+    // 长度相符且全部可匹配 → 成功
+    const ok = app._applyLineAnswer(q, '甲,二');
+    check('F79-2 合法配对应用成功', ok === true, String(ok));
+    check('F79-2 下拉框值已按配对写入',
+        String(q.lineSelects[0].value) === '1' && String(q.lineSelects[1].value) === '2',
+        JSON.stringify(q.lineSelects.map((s) => s.value)));
+    app.destroy();
+});
+
+test('F79-3 JSON 数组形式的配对答案同样可用（LLM json 模式的常见形态）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="work" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const doc = await lineQuizFrame(env);
+    const q = app._workQuestionList(doc)[0];
+    const ok = app._applyLineAnswer(q, '["乙","三"]');
+    check('F79-3 JSON 数组被正确解析并应用', ok === true, String(ok));
+    check('F79-3 值正确',
+        String(q.lineSelects[0].value) === '2' && String(q.lineSelects[1].value) === '3',
+        JSON.stringify(q.lineSelects.map((s) => s.value)));
+    app.destroy();
+});
+
+test('F79-4 完成判定：全部下拉框选中才算已作答（未选不计）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="work" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const doc = await lineQuizFrame(env);
+    const q = app._workQuestionList(doc)[0];
+    const quiz = { win: env.window, doc: doc };
+
+    check('F79-4 未作答时计 0 题', app._workHasAnswer(quiz, [q]) === 0, String(app._workHasAnswer(quiz, [q])));
+
+    // 只选一个 → 仍算未完成（避免"选了第一空就提交"）
+    q.lineSelects[0].value = '1';
+    check('F79-4 只选一个框仍计 0 题', app._workHasAnswer(quiz, [q]) === 0, String(app._workHasAnswer(quiz, [q])));
+
+    q.lineSelects[1].value = '2';
+    check('F79-4 全部选中后计 1 题', app._workHasAnswer(quiz, [q]) === 1, String(app._workHasAnswer(quiz, [q])));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
 // 运行入口
 // ---------------------------------------------------------------------------
 
