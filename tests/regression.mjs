@@ -3045,6 +3045,196 @@ test('F69-3 护栏反例：一个任务点都找不到时，服务端计数为 0
 });
 
 // ---------------------------------------------------------------------------
+// F77：F70-F76（闯关模式/题库缓存/判断题归一/长时阅读/链接任务点）行为固定
+// 背景：这七项由并行开发加入，此前零测试覆盖。本组把它们的行为钉住，防止后续回归。
+// ---------------------------------------------------------------------------
+
+test('F77-1 闯关模式：识别旗帜标记、按节点计数、达阈值安全停止并复位计数', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1', '1.2'])) });
+    const app = await env.boot();
+    check('F77-1 无旗帜标记时不判为闯关模式', app._isInBreakingMode() === false, '');
+
+    // 注入闯关/解锁模式的旗帜标记（上游 cx.ts:1087-1089 的两个类名）
+    env.window.document.body.insertAdjacentHTML('beforeend', '<div class="catalog_points_sa"></div>');
+    check('F77-1 出现 .catalog_points_sa 后判为闯关模式', app._isInBreakingMode() === true, '');
+
+    const k1 = app._countBreakingModeEntry();
+    const k2 = app._countBreakingModeEntry();
+    check('F77-1 同节点重复进入会累加计数', k1 === 1 && k2 === 2, 'k1=' + k1 + ' k2=' + k2);
+
+    app._breakingModeStuck = null;
+    app.configs.breakingModeStuckThreshold = 3;
+    const k3 = app._countBreakingModeEntry();
+    const k4 = app._countBreakingModeEntry();
+    check('F77-1 阈值前不停止', k3 === 1 && k4 === 2, 'k3=' + k3 + ' k4=' + k4);
+    app._stopForBreakingModeStuck(3);
+    check('F77-1 达阈值后置停止标记', app._breakingModeStopped === true, '');
+    const key = app._breakingModeKey();
+    check('F77-1 计数复位为 1（用户手动处理后可继续，不立刻又触发）',
+        !!(key && app._breakingModeStuck && app._breakingModeStuck[key] === 1),
+        'count=' + (key && app._breakingModeStuck ? app._breakingModeStuck[key] : 'n/a'));
+    check('F77-1 日志给出可操作处理方法', env.xt.has('请手动完成章节测验'), JSON.stringify(env.xt.logs.slice(-3)));
+
+    // 开关关闭后不再判定（不干扰现有流程）
+    app.configs.breakingModeGuard = false;
+    check('F77-1 breakingModeGuard=false 时不判定', app._isInBreakingMode() === false, '');
+    app.destroy();
+});
+
+test('F77-2 题库缓存：写入即可读回、关闭开关即失效、命中带来源标记', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
+    const app = await env.boot();
+    app.configs.questionCacheEnabled = true;
+
+    const wrote = app._qcacheSet('题干甲', 'single', 'B', 'selfcheck');
+    check('F77-2 写入成功返回 true', wrote === true, String(wrote));
+    const got = app._qcacheGet('题干甲');
+    check('F77-2 读回答案与题型', !!got && got.answer === 'B' && got.kind === 'single',
+        JSON.stringify(got));
+    check('F77-2 命中标记 fromCache=true（调用方据此跳过 LLM）', !!got && got.fromCache === true, '');
+    check('F77-2 未命中的题目返回 null', app._qcacheGet('不存在的题干') === null, '');
+
+    // 归一化后同题不重复写入（对齐上游 common.ts:1395 的去重语义：已存在则跳过、不覆盖）
+    const dup = app._qcacheSet('题干 甲（补充）', 'single', 'C', 'selfcheck');
+    check('F77-2 同题重复写入被拒（返回 false，保持首写答案）', dup === false, String(dup));
+    const again = app._qcacheGet('题干甲');
+    check('F77-2 首写答案未被覆盖', !!again && again.answer === 'B', JSON.stringify(again));
+
+    // 「先查缓存命中即不请求 LLM」这条链路的断言：_answerCacheGet 会回落到持久缓存
+    app._answerCache = new Map();
+    const viaAnswerCache = app._answerCacheGet('题干甲');
+    check('F77-2 _answerCacheGet 会话未命中时回落持久缓存',
+        !!viaAnswerCache && viaAnswerCache.answer === 'B', JSON.stringify(viaAnswerCache));
+
+    // 上限淘汰：questionCacheMax 生效（超出即删最旧的一条）
+    app.configs.questionCacheMax = 2;
+    app._qcacheData = Object.create(null);
+    app._qcacheSet('题干一', 'single', 'A', 'selfcheck');
+    app._qcacheSet('题干二', 'single', 'B', 'selfcheck');
+    app._qcacheSet('题干三', 'single', 'C', 'selfcheck');
+    const keys = Object.keys(app._qcacheData || {});
+    check('F77-2 超出上限后自动淘汰最旧条目', keys.length <= 2, 'keys=' + keys.length);
+
+    app.configs.questionCacheEnabled = false;
+    check('F77-2 关闭开关后不再命中', app._qcacheGet('题干甲') === null, '');
+    app.destroy();
+});
+
+test('F77-3 判断题选项归一：True/False/對/錯 与「对/错」都被归一', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
+    const app = await env.boot();
+    const doc = env.window.document;
+    const make = (text) => {
+        const el = doc.createElement('div');
+        el.textContent = text;
+        doc.body.appendChild(el);
+        return el;
+    };
+
+    const cases = [
+        ['True', '对'], ['False', '错'],
+        ['對', '对'], ['錯', '错'],
+        ['对', '对'], ['错', '错'],
+        ['正确', '对'], ['错误', '错'],
+        ['√', '对'], ['×', '错'],
+    ];
+    const bad = [];
+    for (const [raw, want] of cases) {
+        const norm = app._normalizeJudgeOption(make(raw));
+        // 归一结果字段是 text（返回 { text, from }）。目标值是语义化的「对/错」（与下游
+        // _llmNormalizeJudge 同一套词汇），不是符号本身——两者的匹配是等价的。
+        if (!norm || norm.text !== want) bad.push(raw + ' → ' + JSON.stringify(norm && norm.text) + '（期望 ' + want + '）');
+    }
+    check('F77-3 十种写法全部归一为对/错语义', bad.length === 0, bad.join('；'));
+
+    // 非判断题的选项不应被改写
+    const norm2 = app._normalizeJudgeOption(make('选项甲的完整描述文字'));
+    check('F77-3 普通选项不被归一（避免误改题干选项）', norm2 === null, JSON.stringify(norm2));
+
+    // 纯图标判断题：选项无文字、只有 .ri 图标时按图标推断（上游 cx.ts:2070-2073）
+    const iconEl = doc.createElement('div');
+    iconEl.innerHTML = '<i class="ri"></i>';
+    doc.body.appendChild(iconEl);
+    const iconNorm = app._normalizeJudgeOption(iconEl);
+    check('F77-3 纯图标选项按图标推断出对/错',
+        !!iconNorm && (iconNorm.text === '对' || iconNorm.text === '错'), JSON.stringify(iconNorm));
+
+    app.configs.judgeOptionNormalize = false;
+    check('F77-3 开关关闭时不再归一（由调用方读取该开关）',
+        app.configs.judgeOptionNormalize === false, '');
+    app.destroy();
+});
+
+test('F77-4 长时阅读：识别 timing iframe、解析秒数、未完成才拦截', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<iframe id="book" name="bookifame" src="about:blank"></iframe>' });
+    const app = await env.boot();
+    const frame = env.window.document.getElementById('book');
+    frame.setAttribute('src', '/readsvr/book/mooc?timing=120');
+
+    check('F77-4 识别到 timereader 帧', !!app._findTimereaderFrame(), '');
+    check('F77-4 未完成时判为 timereader 节点', app._isTimereaderNode() === true, '');
+    const hit = app._findTimereaderFrame();
+    check('F77-4 解析出 timing=120 秒', app._timereaderSeconds(hit) === 120, 'sec=' + app._timereaderSeconds(hit));
+
+    // 无 timing 参数时回落默认 60（对齐上游 cx.ts:1804）
+    frame.setAttribute('src', '/readsvr/book/mooc');
+    check('F77-4 无 timing 参数回落默认 60 秒',
+        app._timereaderSeconds(app._findTimereaderFrame()) === 60, '');
+
+    app.configs.timereaderAuto = false;
+    check('F77-4 开关关闭后不再识别', app._findTimereaderFrame() === null, '');
+    app.destroy();
+});
+
+test('F77-5 链接任务点：识别 #hyperlink、关闭开关即不识别、已完成让位', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
+    const app = await env.boot();
+    check('F77-5 无 #hyperlink 时不识别', app._findHyperlinkTask() === null, '');
+
+    env.window.document.body.insertAdjacentHTML('beforeend', '<div class="ans-attach-ct"><div id="hyperlink"><a href="#">外部链接任务</a></div></div>');
+    const hit = app._findHyperlinkTask();
+    check('F77-5 识别到 #hyperlink 任务点', !!hit && !!hit.el, JSON.stringify(hit && { tag: hit.el.tagName }));
+    check('F77-5 未完成时判为 hyperlink 节点', app._isHyperlinkNode() === true, '');
+
+    // 已完成的任务点必须让位（交给既有「已完成 → 有界前进」流程）。
+    // 完成标记在 .ans-attach-ct 容器上（与 F20 的图标级判定同一口径）。
+    hit.el.closest('.ans-attach-ct').className = 'ans-attach-ct ans-job-finished';
+    check('F77-5 已完成时不拦截（让位既有流程）', app._isHyperlinkNode() === false, '');
+
+    app.configs.hyperlinkAuto = false;
+    check('F77-5 开关关闭后不再识别', app._findHyperlinkTask() === null, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F78：F73 完成率提交闸门（安全敏感）——默认必须"不改变任何现有行为"
+// ---------------------------------------------------------------------------
+
+test('F78 提交闸门：默认关闭且放行条件是「完成率达标 且 显式开启自动提交」', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) });
+    const app = await env.boot();
+
+    check('F78 默认 workSubmitMinRate=0（闸门关闭，不改变既有提交行为）',
+        app.configs.workSubmitMinRate === 0, 'value=' + app.configs.workSubmitMinRate);
+    check('F78 默认 llmAutoSubmit=false（不自动提交）',
+        app.configs.llmAutoSubmit === false, 'value=' + app.configs.llmAutoSubmit);
+
+    // 闸门只应在阈值 > 0 时介入；放行必须同时满足「完成率达标」与「显式开启自动提交」。
+    // 用源码文本断言锁住这两个条件，防止后续把闸门改宽（例如把 llmAutoSubmit 换成 llmEnabled）。
+    // 用索引切片而不是正则：闸门块里有换行与缩进，位置切削比正则更不容易受转义影响。
+    const src = readFileSync(sourcePath, 'utf8');
+    const gStart = src.indexOf('const minRate = Number(this.configs.workSubmitMinRate)');
+    const gateBlock = gStart >= 0 ? src.slice(gStart, gStart + 1200) : '';
+    check('F78 源码中存在提交闸门实现', gStart >= 0, 'index=' + gStart);
+    check('F78 闸门仅在阈值 > 0 时启用', gateBlock.indexOf('if (minRate > 0)') >= 0, '');
+    check('F78 放行条件同时要求完成率达阈值与自动提交开关',
+        gateBlock.indexOf('rate >= minRate') >= 0 && gateBlock.indexOf('llmAutoSubmit === true') >= 0, '');
+    check('F78 未放行时走 giveUp（只暂存不提交，不硬提交）',
+        gateBlock.indexOf('giveUp(') >= 0 && gateBlock.indexOf('闸门未放行') >= 0, '');
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
 // 运行入口
 // ---------------------------------------------------------------------------
 

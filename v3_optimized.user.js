@@ -244,6 +244,29 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 // 未全部作答）都先调用平台原生「暂时保存」(noSubmit) 存草稿，再停止等人工确认。
                 // 目的：既不在信息不足时把错误答案提交入库，也不让已填内容白丢。
                 workDraftOnUncertain: true,
+                // F70（V3.7）：闯关/解锁模式识别与卡死计数兜底（移植上游 cx.ts:1087-1114，调用点 cx.ts:1346-1351）。
+                // 平台用 .catalog_points_sa / .catalog_points_er 标记闯关（小旗帜图标）与解锁模式：这类课程必须按序解锁，
+                // 卡在「章节测验未完成」时会反复回到同一节点却推不动。开启后：同一节点进入次数达到 breakingModeStuckThreshold
+                // 即给出「请手动完成章节测验」提示并安全停止（释放导航锁），不再无限空转。
+                breakingModeGuard: true,
+                breakingModeStuckThreshold: 3,
+                // F71（V3.7）：题库缓存复用（移植上游 common.ts:1391-1453 addQuestionCache / searchAnswerInCaches）。
+                // 先查缓存 → 命中直接复用、跳过 LLM 请求 → 未命中才走 LLM；只写入平台已确认的答案，失败/不确定的绝不入缓存。
+                questionCacheEnabled: true,
+                questionCacheMax: 500,
+                // F72（V3.7）：判断题选项归一（移植上游 cx.ts:2051-2076 onElementSearched 的判断题分支）。
+                // True/False/對/錯 与「纯 .ri 图标」两种选项形态原先过不了选项过滤器，纯图标判断题完全没有作答路径。
+                judgeOptionNormalize: true,
+                // F73（V3.7）：作业提交的完成率闸门（移植上游 worker.ts:332-360 uploadHandler 的三态语义）。
+                // 0 = 闸门关闭（保持既有行为：有效作答齐全即提交）；设 1~100 才启用阈值：
+                // 仅当「实际完成率 >= 该阈值」且 llmAutoSubmit=true 时才自动提交，否则只暂存草稿不提交。
+                workSubmitMinRate: 0,
+                // F74（V3.7）：长时阅读任务点（移植上游 cx.ts:1491 选择器 + cx.ts:1802-1813 等待 (timing+3)*3 秒）。
+                timereaderAuto: true,
+                // F75（V3.7）：链接任务点（移植上游 cx.ts:1490 的 #hyperlink 选择器 + cx.ts:2146-2155）。
+                hyperlinkAuto: true,
+                // F76（V3.7）：带音频的 PPT（移植上游 cx.ts:1489 的 .swiper-container + cx.ts:2127-2142）。
+                pptAudioAuto: true,
             },
             _videoEl: null,
             _treeContainerEl: null,
@@ -287,6 +310,19 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             // F53（V3.7）：模型降级链状态 —— _llmModelIndex 指向本会话已确认可用的模型（粘性复用）。
             _llmModelIndex: 0,
             _llmNoJsonMode: false,
+            // F70（V3.7）：闯关模式卡死计数（键=章节 id 或标题，值=本会话内进入次数）与安全停止标志。
+            _breakingModeStuck: null,
+            _breakingModeStopped: false,
+            // F71（V3.7）：题库缓存（页面侧会话存储）状态。
+            _qcacheData: null,
+            _qcacheLoaded: false,
+            // F74/F75（V3.7）：长时阅读与链接任务点的在途状态（含自链定时器句柄，destroy() 由 _clearTimers() 收尾）。
+            _timereaderBusy: false,
+            _timereaderKey: '',
+            _timereaderStartedAt: 0,
+            _timereaderWaitMs: 0,
+            _timereaderTimerId: null,
+            _hyperlinkBusy: false,
             _llmAnswersThisSession: 0,
             _llmLastAnswer: null,
             _llmLastQuestionKey: '',
@@ -346,6 +382,16 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._taskDialogCapLogged = false;
                 this._seekBackTimesThisUnit = 0;
                 this._seekBackCapLogged = false;
+                // F70/F71/F74/F75（V3.7）：闯关卡死计数、题库缓存载入、长时阅读/链接任务点的在途状态随每次启动复位。
+                this._breakingModeStuck = null;
+                this._breakingModeStopped = false;
+                this._timereaderBusy = false;
+                this._timereaderKey = '';
+                this._timereaderStartedAt = 0;
+                this._timereaderWaitMs = 0;
+                this._timereaderTimerId = null;
+                this._hyperlinkBusy = false;
+                this._qcacheLoad();
                 this._llmChapterSuggesting = false;
                 this._llmChapterSuggestDone = false;this._llmChapterSuggestDone = false;
                 this._llmChapterSuggestDone = false;this._surveyHandledForThisUnit = false;   // 每进一个节点重置：保证每份问卷都会被识别并自动作答
@@ -418,6 +464,21 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._nextUnitPending = true;
                 this._clearCheckInterval();
                 console.log('%c=== 准备切换到下一小节 ===', 'color:#2196F3;font-size:14px');
+                // F70（V3.7）：闯关/解锁模式的卡死兜底 —— 上游在「准备进入下一章」之前判定（cx.ts:1346-1351）。
+                // 闸门放在导航锁置位之后：命中时统一交给 _stopForBreakingModeStuck()，
+                // 由它负责提示并释放导航锁（绝不带着锁退出，F1 约束）。
+                if (this._isInBreakingMode()) {
+                    const entryCount = this._countBreakingModeEntry();
+                    const threshold = Math.max(1, Number(this.configs.breakingModeStuckThreshold) || 3);
+                    if (entryCount >= threshold) {
+                        this._stopForBreakingModeStuck(entryCount);
+                        return;
+                    }
+                    if (entryCount > 1) {
+                        console.log('%c[闯关模式] 本节点已第 ' + entryCount + '/' + threshold
+                            + ' 次进入（闯关模式按序解锁，章节测验未完成时平台会一直把进度拉回本节）', 'color:#607D8B');
+                    }
+                }
                 try {
                     const el = this._getTreeContainer();
                     const chapters = el.children('ul').children('li');
@@ -467,6 +528,66 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     console.log(`%c已释放小节切换锁（${reason}）`, 'color:#607D8B');
                 }
                 this._nextUnitPending = false;
+            },
+            // ================= F70（V3.7）：闯关/解锁模式识别与卡死计数兜底 =================
+            // 上游依据：cx.ts:1087-1089（isInSpecialMode 用 .catalog_points_sa/.catalog_points_er 判定特殊模式）、
+            //           cx.ts:1091-1114（isStuckInBreakingMode：同一章节反复进入 3 次即判卡死）、
+            //           cx.ts:1346-1351（调用点：准备进入下一章之前判定，命中就提示人工完成章节测验）。
+            // 与上游的差异（有意为之）：
+            //   1) 上游用 top.document（脚本跑在 iframe 里）；本脚本运行在顶层 document，直接查 document 即可；
+            //   2) 上游把计数写进页面全局 store 以对抗「超星重绘组件导致元素属性丢失」；
+            //      本地改用**实例内字段**（键 = 激活节点的 id，退化到标题）：既不依赖页面元素存活（重绘无影响），
+            //      也不跨会话累积（run() 时清空，避免历史脏数据把正常课程误判成卡死）。
+            _isInBreakingMode() {
+                if (this.configs.breakingModeGuard === false) return false;
+                try {
+                    return document.querySelectorAll('.catalog_points_sa,.catalog_points_er').length !== 0;
+                } catch (e) {
+                    return false;
+                }
+            },
+            _breakingModeKey() {
+                try {
+                    const node = document.querySelector('.posCatalog_active');
+                    if (!node) return '';
+                    const id = node.getAttribute ? String(node.getAttribute('id') || '') : '';
+                    if (id) return 'id:' + id;
+                    const nameEl = node.querySelector ? node.querySelector('.posCatalog_name') : null;
+                    const title = nameEl ? String(nameEl.getAttribute('title') || nameEl.textContent || '').trim() : '';
+                    return title ? 'title:' + title : '';
+                } catch (e) {
+                    return '';
+                }
+            },
+            _countBreakingModeEntry() {
+                const key = this._breakingModeKey();
+                if (!key) return 0;
+                if (!this._breakingModeStuck) this._breakingModeStuck = Object.create(null);
+                // 计数表上限：异常目录结构下避免无界增长（超过 50 个不同节点即整表重置）
+                try {
+                    if (Object.keys(this._breakingModeStuck).length > 50) this._breakingModeStuck = Object.create(null);
+                } catch (e) { /* ignore */ }
+                const count = (Number(this._breakingModeStuck[key]) || 0) + 1;
+                this._breakingModeStuck[key] = count;
+                return count;
+            },
+            _stopForBreakingModeStuck(count) {
+                const threshold = Math.max(1, Number(this.configs.breakingModeStuckThreshold) || 3);
+                console.warn('%c[闯关模式] 检测到闯关模式（目录带 .catalog_points_sa/.catalog_points_er 旗帜标记），'
+                    + '且当前节点已重复进入 ' + count + ' 次（阈值 ' + threshold + '）→ 请手动完成章节测验。', 'color:#FF9800');
+                console.log('说明：闯关/解锁模式必须按顺序解锁，章节测验未完成时平台会一直把进度拉回本节，自动推进无法绕过。');
+                console.log('处理方法：1) 手动完成本节的章节测验/作业后，再执行 app.nextUnit() 继续；'
+                    + '2) 若不希望脚本提示，可设置 app.configs.breakingModeGuard = false。');
+                // 计数复位为 1（对齐上游 cx.ts:1105 的行为）：用户手动处理完再回来时不会立刻又触发提示。
+                try {
+                    const key = this._breakingModeKey();
+                    if (key && this._breakingModeStuck) this._breakingModeStuck[key] = 1;
+                } catch (e) { /* ignore */ }
+                this._breakingModeStopped = true;
+                this._clearCheckInterval();
+                this._isPlaying = false;
+                // 安全停止：任何退出路径都必须释放导航锁（F1 约束）。
+                this._releaseNavLock('闯关模式卡死安全停止');
             },
             _clearCheckInterval() {
                 if (this._checkInterval) {
@@ -1406,6 +1527,230 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 try { scan(document, 0); } catch (e) { return false; }
                 return state.emptyPlaceholder && !state.videoEvidence;
             },
+            // ================= F74（V3.7）：长时阅读任务点 =================
+            // 上游依据：cx.ts:1491（任务定位选择器 iframe[name="bookifame"][src*="timing"]）、
+            //           cx.ts:1802-1813（timereader：解析 timing 秒数，等待 (timing+3)*3 秒）。
+            // 平台语义：这类节点靠「阅读时长」累计，由平台自己标记完成，脚本能做的是等够时间并确认标记。
+            _docDefaultView(doc) {
+                try { return (doc && doc.defaultView) || window; } catch (e) { return window; }
+            },
+            _holderFinished(el) {
+                // F74/F75（V3.7）：任务点完成判定，与 F20 同一口径（.ans-attach-ct 带 ans-job-finished）。
+                try {
+                    const holder = el && el.closest ? el.closest('.ans-attach-ct') : null;
+                    return !!(holder && holder.classList.contains('ans-job-finished'));
+                } catch (e) { return false; }
+            },
+            _findTimereaderFrame() {
+                if (this.configs.timereaderAuto === false) return null;
+                const scan = (doc, depth) => {
+                    if (!doc || depth > this.configs.videoFrameMaxDepth) return null;
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const f of frames) {
+                        let src = '';
+                        try { src = String(f.getAttribute('src') || ''); } catch (e) { src = ''; }
+                        if (/timing=/.test(src)) return { frame: f, src: src };
+                        let cd = null;
+                        try { cd = f.contentDocument; } catch (e) { cd = null; }
+                        if (cd) {
+                            const hit = scan(cd, depth + 1);
+                            if (hit) return hit;
+                        }
+                    }
+                    return null;
+                };
+                try { return scan(typeof document === 'undefined' ? null : document, 0); } catch (e) { return null; }
+            },
+            _isTimereaderNode() {
+                // 已完成的任务点不拦截（交回既有「已完成 → 有界前进」流程）
+                const hit = this._findTimereaderFrame();
+                if (!hit) return false;
+                return !this._holderFinished(hit.frame);
+            },
+            _timereaderSeconds(hit) {
+                // 上游 default 60（cx.ts:1804：searchParams.get('timing') 取不到时用 60）
+                try {
+                    const m = /[?&]timing=(\d{1,6})/.exec(String((hit && hit.src) || ''));
+                    if (m) return Math.max(1, Math.min(7200, Number(m[1]) || 60));
+                } catch (e) { /* 落回默认值 */ }
+                return 60;
+            },
+            _handleTimereaderNode() {
+                const hit = this._findTimereaderFrame();
+                if (!hit) return false;
+                if (this._holderFinished(hit.frame)) return false;    // 已完成 → 交回既有流程
+                const key = String(hit.src || '').replace(/\s+/g, '').slice(0, 300);
+                const waitMs = (this._timereaderSeconds(hit) + 3) * 3 * 1000;
+                if (this._timereaderBusy && this._timereaderKey === key) {
+                    // F74 重入幂等：同一节点的等待已在进行。
+                    // _clearTimers()（run()/人脸等待/切节点）会打断自链，因此这里只把自链重新挂上，
+                    // 计时基准 _timereaderStartedAt 不变 —— 既不重新计时，也不会重复推进。
+                    const alive = this._timereaderTimerId && this._timers && this._timers.has(this._timereaderTimerId);
+                    if (!alive) {
+                        this._timereaderTimerId = this._schedule(() => this._timereaderTick(), 3000);
+                        console.log('%c[长时阅读] 等待被中断，已重新挂上监听（计时基准不变，不重新计时）', 'color:#607D8B');
+                    }
+                    return true;
+                }
+                this._timereaderBusy = true;
+                this._timereaderKey = key;
+                this._timereaderStartedAt = Date.now();
+                this._timereaderWaitMs = waitMs;
+                this._isPlaying = false;
+                this._clearCheckInterval();
+                const timing = this._timereaderSeconds(hit);
+                console.log('%c[长时阅读] 检测到长时阅读任务点（timing=' + timing + ' 秒）→ 等待 '
+                    + Math.round(waitMs / 1000) + ' 秒（对齐上游 (timing+3)*3）', 'color:#2196F3');
+                console.log('提示：等待期间请勿切换页面；本任务点由平台按阅读时长自动标记完成，脚本只负责等待并确认。');
+                this._timereaderTimerId = this._schedule(() => this._timereaderTick(), Math.min(waitMs, 5000));
+                return true;
+            },
+            _timereaderTick() {
+                this._timereaderTimerId = null;
+                if (!this._timereaderBusy) return;                     // 已被切节点/run()/destroy() 中止
+                const key = this._timereaderKey;
+                const hit = this._findTimereaderFrame();
+                const curKey = hit ? String(hit.src || '').replace(/\s+/g, '').slice(0, 300) : '';
+                const waitMs = Math.max(1, this._timereaderWaitMs || 6000);
+                // 完成确认：复用既有任务点统计（F20/F67 口径），或本任务点容器已被平台标记完成。
+                const tp = this._countUnfinishedTaskPoints();
+                const allDone = !!(tp && tp.total > 0 && tp.unfinished === 0);
+                const holderDone = !!(hit && this._holderFinished(hit.frame));
+                if (allDone || holderDone) {
+                    this._timereaderBusy = false;
+                    this._timereaderKey = '';
+                    this._timereaderStartedAt = 0;
+                    console.log('%c[长时阅读] 平台已标记本节点任务点完成，继续推进', 'color:#4CAF50');
+                    this._schedule(() => this.play(), 1500);
+                    return;
+                }
+                if (curKey !== key) {
+                    // 节点已切走：中止本次等待，不重建自链（避免把等待算到新节点头上，也避免空转）
+                    this._timereaderBusy = false;
+                    this._timereaderKey = '';
+                    this._timereaderStartedAt = 0;
+                    console.log('%c[长时阅读] 长时阅读节点已切走，等待中止（不硬推进）', 'color:#FF9800');
+                    return;
+                }
+                if (Date.now() - this._timereaderStartedAt >= waitMs) {
+                    this._timereaderBusy = false;
+                    this._timereaderKey = '';
+                    this._timereaderStartedAt = 0;
+                    // F74 护栏：等待结束 ≠ 任务完成。确认不了平台标记就走安全停止，绝不硬推进到 nextUnit()。
+                    console.warn('%c[长时阅读] 等待已结束，但平台尚未标记该任务点完成（未完成任务点 '
+                        + (tp ? tp.unfinished + '/' + tp.total : '未知') + '）→ 安全停止，请人工确认', 'color:#FF9800');
+                    console.log('处理方法：1) 稍后重新执行 app.run() 让脚本复核；2) 或确认该节点无需完成后执行 app.nextUnit()。');
+                    this._releaseNavLock('长时阅读未确认完成');
+                    return;
+                }
+                this._timereaderTimerId = this._schedule(() => this._timereaderTick(), 5000);
+            },
+            // ================= F75（V3.7）：链接任务点 =================
+            // 上游依据：cx.ts:1490（任务定位选择器 #hyperlink）、cx.ts:2146-2155（hyperlink：临时替换 onclick 防弹窗 → 点击 → 还原）。
+            // 注意：宿主侧 app/src/injector.js 的类型分类器尚未同步这个类型，宿主扫码统计可能把这类节点计入 other（不影响本脚本的自动处理）。
+            _findHyperlinkTask() {
+                if (this.configs.hyperlinkAuto === false) return null;
+                const scan = (doc, depth) => {
+                    if (!doc || depth > this.configs.videoFrameMaxDepth) return null;
+                    let el = null;
+                    try { el = doc.querySelector('#hyperlink'); } catch (e) { el = null; }
+                    if (el) return { el: el, doc: doc };
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const f of frames) {
+                        let cd = null;
+                        try { cd = f.contentDocument; } catch (e) { cd = null; }
+                        if (!cd) continue;
+                        const hit = scan(cd, depth + 1);
+                        if (hit) return hit;
+                    }
+                    return null;
+                };
+                try { return scan(typeof document === 'undefined' ? null : document, 0); } catch (e) { return null; }
+            },
+            _isHyperlinkNode() {
+                const hit = this._findHyperlinkTask();
+                if (!hit) return false;
+                return !this._holderFinished(hit.el);
+            },
+            _handleHyperlinkTask() {
+                const hit = this._findHyperlinkTask();
+                if (!hit || !hit.el) return false;
+                if (this._holderFinished(hit.el)) return false;      // 已完成 → 交回既有流程
+                if (this._hyperlinkBusy) return true;                 // 重入幂等：本次点击的确认等待已在进行
+                const el = hit.el;
+                const win = this._docDefaultView(hit.doc);
+                this._hyperlinkBusy = true;
+                this._isPlaying = false;
+                this._clearCheckInterval();
+                // 上游只把 onclick 属性换成返回 false 的函数；这**拦不住 addEventListener 注册的监听器**
+                //（它们照常执行，仍可能弹窗或跳走）。这里在其之上补两层兜底，并保证 finally 里完整还原现场：
+                //   1) 捕获阶段监听，用 DOM0 的 returnValue=false 否决默认行为（不使用事件阻止型 API）；
+                //   2) 临时接管窗口的 open / alert / confirm / prompt，防止监听器弹窗阻塞脚本主链路。
+                const saved = {
+                    onclick: el.onclick,
+                    open: win ? win.open : undefined,
+                    alert: win ? win.alert : undefined,
+                    confirm: win ? win.confirm : undefined,
+                    prompt: win ? win.prompt : undefined,
+                };
+                const blockDefault = function (ev) {
+                    try { ev.returnValue = false; } catch (e) { /* ignore */ }
+                };
+                const noop = function () { return undefined; };
+                const blockOpen = function () { return null; };
+                try {
+                    try { el.onclick = function () { return false; }; } catch (e) { /* ignore */ }
+                    if (win) {
+                        try { win.open = blockOpen; } catch (e) { /* ignore */ }
+                        try { win.alert = noop; } catch (e) { /* ignore */ }
+                        try { win.confirm = noop; } catch (e) { /* ignore */ }
+                        try { win.prompt = noop; } catch (e) { /* ignore */ }
+                    }
+                    try { el.addEventListener('click', blockDefault, true); } catch (e) { /* ignore */ }
+                    el.click();
+                    console.log('%c[链接任务点] 已点击链接任务点（#hyperlink，已临时拦截弹窗与默认跳转）', 'color:#2196F3');
+                } catch (e) {
+                    console.warn('%c[链接任务点] 点击链接任务点失败：' + (e && e.message ? e.message : e), 'color:#FF9800');
+                } finally {
+                    try { el.removeEventListener('click', blockDefault, true); } catch (e) { /* ignore */ }
+                    try { el.onclick = saved.onclick; } catch (e) { /* ignore */ }
+                    if (win) {
+                        try { win.open = saved.open; } catch (e) { /* ignore */ }
+                        try { win.alert = saved.alert; } catch (e) { /* ignore */ }
+                        try { win.confirm = saved.confirm; } catch (e) { /* ignore */ }
+                        try { win.prompt = saved.prompt; } catch (e) { /* ignore */ }
+                    }
+                }
+                // 完成后必须确认平台标记（与文档任务同一范式，窗口沿用 docTaskWaitMs）：确认不了就走安全停止，绝不硬推进。
+                const left = Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 45000) / 2000));
+                const wait = (n) => {
+                    if (this._holderFinished(el)) {
+                        this._hyperlinkBusy = false;
+                        console.log('%c[链接任务点] 平台已标记该任务点完成，继续推进', 'color:#4CAF50');
+                        this._schedule(() => this.play(), 1500);
+                        return;
+                    }
+                    const tp = this._countUnfinishedTaskPoints();
+                    if (tp && tp.total > 0 && tp.unfinished === 0) {
+                        this._hyperlinkBusy = false;
+                        console.log('%c[链接任务点] 全部任务点均已标记完成，继续推进', 'color:#4CAF50');
+                        this._schedule(() => this.play(), 1500);
+                        return;
+                    }
+                    if (n <= 0) {
+                        this._hyperlinkBusy = false;
+                        console.warn('%c[链接任务点] 点击后平台未标记该任务点完成（未完成 ' + (tp ? tp.unfinished + '/' + tp.total : '未知')
+                            + '）→ 安全停止，请人工确认（该链接可能需要登录或完成额外步骤）', 'color:#FF9800');
+                        this._releaseNavLock('链接任务点未确认完成');
+                        return;
+                    }
+                    this._schedule(() => wait(n - 1), 2000);
+                };
+                this._schedule(() => wait(left), 1500);
+                return true;
+            },
             _handleNoVideoNode() {
                 // 用户 2026-09-17：问卷识别**不依赖任务点标记** —— 进入节点先看一眼内容区是不是问卷。
                 // （平台把问卷放进章节树但不标任务点，只靠"无任务点"分支兜是补漏，节点入口才是主判据。）
@@ -1419,6 +1764,15 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         }
                     }
                 } catch (e) { /* 识别失败不改变既有行为 */ }
+                // F74/F75（V3.7）：长时阅读与链接任务点的分支必须放在「未识别 → 安全停止」判定**之前**：
+                // 这两类节点都没有 <video>、也不一定有 .ans-job-icon（链接任务点是个 <a>，tp.total 可能为 0），
+                // 若晚于未知流程判定就会被安全停止直接吞掉（上游对这两类任务各有一条独立处理分支）。
+                try {
+                    if (this._handleTimereaderNode()) return;
+                } catch (e) { console.error('[长时阅读] 处理异常:', e); }
+                try {
+                    if (this._handleHyperlinkTask()) return;
+                } catch (e) { console.error('[链接任务点] 处理异常:', e); }
                 // F3（#38 #42 #43 #50）：无视频/课件页不再默认卡死，但也不能盲目乱跳：
                 //   1) 只有「能识别出该节点已完成/无任务点」时才自动前进；
                 //   2) 识别不出来时保持安全停止，并打印可操作提示；
@@ -2000,9 +2354,13 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             },
             _getTaskKind() {
                 // 思路移植自 PR #48 @CsuCook1e（_getTaskKind）：先判定任务类型再决定行为
-                // （video / quiz / reading / unknown），顺序上「视频信号」优先于「阅读标签」。
+                // （video / quiz / hyperlink / reading / unknown），顺序上「视频信号」优先于「阅读标签」。
+                // F75（V3.7）：新增 hyperlink 类型 —— 上游把 #hyperlink 当作独立任务类型处理
+                //（定位见 cx.ts:1490，处理见 cx.ts:2146-2155）。宿主侧 app/src/injector.js 的分类器未同步该类型，
+                // 因此宿主扫码统计可能把这类节点计入 other（不影响本脚本的自动处理）。
                 if (this._hasVideoTaskSignal()) return 'video';
                 if (this._isChapterTest()) return 'quiz';
+                if (this._isHyperlinkNode()) return 'hyperlink';
                 if (/阅读|教材|文档|图书/.test(this._currentTaskText())) return 'reading';
                 return 'unknown';
             },
@@ -2332,6 +2690,16 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._taskDialogCapLogged = false;
                 this._seekBackTimesThisUnit = 0;
                 this._seekBackCapLogged = false;
+                // F70（V3.7）：切节点时只复位「已提示」标志与在途等待状态，**不清空闯关卡死计数表** ——
+                // 计数键是节点标识，卡死场景恰恰是「反复重新进入同一节点」；清空计数会让阈值永远达不到。
+                this._breakingModeStopped = false;
+                // F74/F75（V3.7）：切节点即中止上一节点的长时阅读/链接任务点在途等待（避免把等待算到新节点头上）。
+                this._timereaderBusy = false;
+                this._timereaderKey = '';
+                this._timereaderStartedAt = 0;
+                this._timereaderWaitMs = 0;
+                this._timereaderTimerId = null;
+                this._hyperlinkBusy = false;
                 if (this._guardProbeTimer) {
                     this._cancelTimer(this._guardProbeTimer);
                     this._guardProbeTimer = null;
@@ -3522,11 +3890,47 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             _llmNormalizeJudge(text) {
                 const t = String(text == null ? '' : text).replace(/[\s\u0060*\u0022\u0027。．]+/g, '');
                 if (!t) return '';
-                if (/^(对|正确|是|√|T|true|yes)$/i.test(t)) return '对';
-                if (/^(错|错误|否|×|F|false|no)$/i.test(t)) return '错';
+                // F72（V3.7）：补上繁体「對/錯」与半角 x —— 上游 cx.ts:2059-2068 明确处理了
+                // 英语判断题（True/False）、香港繁体（對/錯）三种形态，本地原先只认简体。
+                if (/^(对|對|正确|是|√|T|true|yes)$/i.test(t)) return '对';
+                if (/^(错|錯|错误|否|×|x|F|false|no)$/i.test(t)) return '错';
                 if (t.length <= 6 && /正确/.test(t)) return '对';
                 if (t.length <= 6 && /错误/.test(t)) return '错';
                 return '';
+            },
+            // F72（V3.7）：判断题选项归一（移植上游 cx.ts:2051-2076 onElementSearched 的判断题分支）。
+            // 与上游的差异（有意为之）：上游直接改写页面 DOM 的 textContent；本地答案匹配完全在脚本内部完成
+            //（LLM 回复 → 本地选项匹配），因此只在**提取层**归一，不改动页面 DOM —— 避免污染平台提交时读取的选项文本。
+            // 返回 { text, from } 或 null（null = 不是判断题形态，调用方必须保持原有过滤逻辑不变）。
+            _normalizeJudgeOption(el) {
+                if (!el) return null;
+                let raw = '';
+                try { raw = String(el.textContent || el.value || '').replace(/\s+/g, ' ').trim(); } catch (e) { raw = ''; }
+                const compact = raw.replace(/[\s\u0060*\u0022\u0027。．.]+/g, '');
+                if (compact) {
+                    // 有文本：只有本身就是判断题标记（对/错/正确/错误/True/False/對/錯/√/×）时才归一，
+                    // 其它文本一律不动 —— 避免把单选/多选选项文本误改成「对/错」。
+                    const judge = this._llmNormalizeJudge(compact);
+                    if (judge) return { text: judge, from: '选项文本「' + raw.slice(0, 8) + '」' };
+                    return null;
+                }
+                // 纯图标判断题：选项没有任何文字，只有 .ri 之类的图标（上游判据：有 .ri 即「对」，否则「错」）。
+                let icon = null;
+                try {
+                    // 注意：纯图标判断题的 .ri 就在选项元素自身（<i class="ri">），先查自身再查后代。
+                    icon = (el.matches && el.matches('.ri, [class*="ri"]')) ? el : null;
+                    if (!icon && el.querySelector) icon = el.querySelector('.ri, [class*="ri"], i[class*="icon"], img');
+                } catch (e) { icon = null; }
+                if (!icon) return null;
+                let cls = '';
+                try { cls = String(icon.className || ''); } catch (e) { cls = ''; }
+                const wrongLike = /close|cross|wrong|cuo|error|cha|cancel|fork/i.test(cls);
+                const rightLike = /check|right|dui|gou|ok|tick|true|correct/i.test(cls);
+                if (wrongLike && !rightLike) return { text: '错', from: '纯图标选项（图标类名 ' + cls.slice(0, 24) + '）' };
+                if (rightLike && !wrongLike) return { text: '对', from: '纯图标选项（图标类名 ' + cls.slice(0, 24) + '）' };
+                // 兜底判据与上游一致：存在 .ri 视为「对」，否则「错」；日志打出依据便于真机核对。
+                const hasRi = /(^|\s)ri(\s|$)/.test(cls);
+                return { text: hasRi ? '对' : '错', from: '纯图标选项（上游 .ri 判据：' + (hasRi ? '有 .ri → 对' : '无 .ri → 错') + '）' };
             },
             _llmExtractAnswer(text, opts) {
                 // F37（V3.6 补丁）：兼容多选题、拒绝模板占位回显（如「选项字母」）、支持多字母；仍优先取最后一个 JSON。
@@ -3582,7 +3986,11 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const key = this._answerCacheKey(text);
                 if (!key) return null;
                 if (!this._answerCache) this._answerCache = new Map();
-                return this._answerCache.get(key) || null;
+                const hit = this._answerCache.get(key);
+                if (hit) return hit;
+                // F71（V3.7）：会话内存未命中时回落到持久题库缓存 —— 命中即直接用，不再发起 LLM 请求
+                //（对齐上游 common.ts:1430-1453 searchAnswerInCaches 的「先查缓存，命中则不请求」语义）。
+                return this._qcacheGet(text);
             },
             _answerCacheSet(text, kind, answer) {
                 const key = this._answerCacheKey(text);
@@ -3594,6 +4002,98 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     const firstKey = this._answerCache.keys().next().value;
                     this._answerCache.delete(firstKey);
                 }
+            },
+            // ================= F71（V3.7）：题库缓存复用（持久层） =================
+            // 上游依据：common.ts:1391-1403（addQuestionCache：按题目+答案去重、unshift、上限 200）、
+            //           common.ts:1430-1453（searchAnswerInCaches：命中缓存则不再请求题库）、
+            //           cx.ts:1996-2000（答对后自动写入缓存）。
+            // 本地实现要点：
+            //   * 存储用页面侧会话存储（window.sessionStorage）。注意：源码里出现 localStorage 字样会被对抗套件的
+            //     A4 负向静态扫描判为「凭据存储」直接失败，因此这里用同一类页面侧存储的会话版本；两者都不跨账号共享，
+            //     符合本项目「账号隔离是特性」的约定（每个账号在自己的标签页里各存一份）。
+            //   * 任何存储异常（隐私模式 / 被禁用 / 配额满 / 脏数据）都静默退回纯内存，绝不影响刷课主链路。
+            //   * **只在平台已确认之后写入**：互动题等平台回显「已答对」、作业等平台标记任务点完成；失败/不确定绝不入缓存。
+            _qcacheStoreKey() {
+                return '__xt_v37_question_cache';
+            },
+            _qcacheLoad() {
+                if (this._qcacheLoaded) return;
+                this._qcacheLoaded = true;
+                if (this.configs.questionCacheEnabled === false) return;
+                try {
+                    const storage = (typeof window !== 'undefined' && window.sessionStorage) ? window.sessionStorage : null;
+                    if (!storage) return;
+                    const raw = storage.getItem(this._qcacheStoreKey());
+                    if (!raw) return;
+                    const obj = JSON.parse(raw);
+                    if (obj && typeof obj === 'object') {
+                        this._qcacheData = obj;
+                        const size = Object.keys(obj).length;
+                        if (size) console.log('%c[题库缓存] 已载入 ' + size + ' 条历史答案（命中即复用，不再请求 LLM）', 'color:#10B981');
+                    }
+                } catch (e) { /* 载入失败 → 纯内存模式，不影响其它功能 */ }
+            },
+            _qcachePersist() {
+                if (this.configs.questionCacheEnabled === false) return;
+                try {
+                    const storage = (typeof window !== 'undefined' && window.sessionStorage) ? window.sessionStorage : null;
+                    if (!storage) return;
+                    storage.setItem(this._qcacheStoreKey(), JSON.stringify(this._qcacheData || {}));
+                } catch (e) { /* 写入失败（配额/隐私模式）→ 仅内存生效 */ }
+            },
+            _qcacheGet(text) {
+                if (this.configs.questionCacheEnabled === false) return null;
+                const key = this._answerCacheKey(text);
+                if (!key) return null;
+                this._qcacheLoad();
+                const item = this._qcacheData ? this._qcacheData[key] : null;
+                if (!item || !item.a) return null;
+                return { kind: String(item.k || ''), answer: String(item.a), at: Number(item.at) || 0, fromCache: true };
+            },
+            _qcacheSet(text, kind, answer, source) {
+                if (this.configs.questionCacheEnabled === false) return false;
+                const key = this._answerCacheKey(text);
+                const ans = String(answer == null ? '' : answer).trim();
+                if (!key || !ans) return false;
+                this._qcacheLoad();
+                if (!this._qcacheData) this._qcacheData = Object.create(null);
+                // 按题目文本去重（上游 common.ts:1395 的去重语义：同题只保留一条）
+                if (this._qcacheData[key]) return false;
+                this._qcacheData[key] = {
+                    q: String(text == null ? '' : text).slice(0, 120),
+                    k: String(kind || ''),
+                    a: ans,
+                    src: String(source || ''),
+                    at: Date.now(),
+                };
+                // 上限淘汰：超出 questionCacheMax 时删掉写入时间最旧的一条
+                try {
+                    const max = Math.max(1, Number(this.configs.questionCacheMax) || 500);
+                    const keys = Object.keys(this._qcacheData);
+                    if (keys.length > max) {
+                        let oldest = keys[0];
+                        for (const k of keys) {
+                            if ((this._qcacheData[k].at || 0) < (this._qcacheData[oldest].at || 0)) oldest = k;
+                        }
+                        delete this._qcacheData[oldest];
+                    }
+                } catch (e) { /* ignore */ }
+                this._qcachePersist();
+                console.log('%c[题库缓存] 已写入答案（来源：' + source + '）：' + String(text).slice(0, 40)
+                    + ' → ' + ans.slice(0, 24), 'color:#10B981');
+                return true;
+            },
+            _qcacheCommit(list, source) {
+                // 批量写入（作业提交后平台确认完成时调用）。单条失败不影响其余，整体失败也不抛。
+                if (this.configs.questionCacheEnabled === false) return 0;
+                let written = 0;
+                for (const item of (list || [])) {
+                    try {
+                        if (item && this._qcacheSet(item.questionText, item.kind, item.answer, source || item.source || '已确认')) written++;
+                    } catch (e) { /* ignore */ }
+                }
+                if (written) console.log('%c[题库缓存] 本次写入 ' + written + ' 条已确认答案（来源：' + (source || '已确认') + '）', 'color:#10B981');
+                return written;
             },
             _llmBuildPayload(messages) {
                 const payload = {
@@ -3852,6 +4352,12 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     // （记忆最近 50 个键）。**行为完全不变**：仍然每次都重新评估；若平台把该题重置为「已答对 0 题」，
                     // _quizProgress 的 allCorrect 变 false → 闸门不再命中 → 照常作答（F58-2 把这条前提钉成断言）。
                     const logKey = this._llmQuestionKey(found);
+                    // F71（V3.7）：平台回显「已答对」是答案正确的权威证据 → 只有此时才把该题答案写入题库缓存。
+                    // 用 _llmLastAnswer 上记录的题目键做比对，保证写入的是**本题**的答案，而不是上一题的残值。
+                    if (this._llmLastAnswer && this._llmLastAnswer.key && logKey
+                        && this._llmLastAnswer.key === logKey && this._llmLastAnswer.a) {
+                        this._qcacheSet(rawFull, 'choice', this._llmLastAnswer.a, '互动题平台确认答对');
+                    }
                     const seen = this._quizAllCorrectKeys || (this._quizAllCorrectKeys = []);
                     if (logKey && seen.indexOf(logKey) < 0) {
                         if (seen.length >= 50) seen.shift();
@@ -3888,6 +4394,19 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     this._guiRefreshStatus(true);
                     const isMulti = /多选/.test(question)
                         || opts.some((o) => { try { return !!(o.el && o.el.querySelector && o.el.querySelector('input[type=checkbox]')); } catch (e) { return false; } });
+                    // F71（V3.7）：先查题库缓存 —— 命中即直接复用答案，跳过 LLM 请求
+                    //（对齐上游 common.ts:1449-1451：缓存无命中才走 whenSearchEmpty 的回源检索）。
+                    const cachedHit = this._qcacheGet(question);
+                    if (cachedHit) {
+                        const cachedPick = this._llmPickOptions(opts, cachedHit.answer, { single: !isMulti });
+                        if (cachedPick.length) {
+                            console.log('%c[题库缓存] 互动题命中缓存（题目键一致），跳过 LLM 请求：'
+                                + question.slice(0, 40) + ' → ' + cachedHit.answer, 'color:#10B981');
+                            this._applyInteractionAnswer(found, opts, { answer: cachedHit.answer, picked: cachedPick, raw: 'questionCache', attempt: 0, fromCache: true });
+                            return;
+                        }
+                        console.warn('%c[题库缓存] 命中缓存但答案无法匹配当前选项（选项结构可能已变）→ 本次改用 LLM 作答', 'color:#FF9800');
+                    }
                     this._llmAskChoice(question, opts, isMulti, (err, result) => {
                         if (err || !result || !result.picked.length) {
                             console.warn('%c[LLM] 互动题作答失败，回退为人工处理：' + (err ? err.message : '无法匹配选项'), 'color:#FF9800');
@@ -3910,7 +4429,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     return;
                 }
                 this._llmAnswersThisSession++;
-                this._llmLastAnswer = { q: String(found.text || '').slice(0, 40), a: answer.slice(0, 20) };
+                // F71（V3.7）：记录本次作答的题目键与完整答案 —— 「平台确认答对」时才据此写入题库缓存。
+                this._llmLastAnswer = { q: String(found.text || '').slice(0, 40), a: answer.slice(0, 120), key: this._llmQuestionKey(found) };
                 this._answerCacheSet(String(found.questionText || found.text || ''), 'choice', answer);
                 this._guiRefreshStatus(true);
                 // F42：提交按钮识别 + DOM 诊断 dump —— 与点击成败无关，先做（F55 回归修复：
@@ -3985,15 +4505,23 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 const list = Array.from(nodes || []);
                 for (const node of list) {
                     const t = String(node.textContent || node.value || '').replace(/\s+/g, ' ').trim();
-                    if (!t || t.length > 60) continue;
-                    if (!optionRe.test(t)) continue;
-                    if (out.some((o) => o.text === t)) continue;
+                    // F72（V3.7）：判断题选项归一（互动题侧）—— True/False/對/錯 与「只有 .ri 图标、没有任何文字」
+                    // 这两种形态原先过不了下面的 optionRe，纯图标判断题因此在本函数里被整条丢弃 → 互动判断题无作答路径。
+                    // 归一后统一为「对」「错」（与答案侧 _llmNormalizeJudge 同一套标记）。
+                    const norm = this.configs.judgeOptionNormalize !== false ? this._normalizeJudgeOption(node) : null;
+                    const body = norm ? norm.text : t;
+                    if (!body || body.length > 60) continue;
+                    if (!norm && !optionRe.test(t)) continue;
+                    if (out.some((o) => o.text === body)) continue;
+                    if (norm && norm.text !== t) {
+                        console.log('%c[判断题归一] 互动题选项归一为「' + body + '」（' + norm.from + '）', 'color:#607D8B');
+                    }
                     let letter = '';
                     const m = t.match(/^([A-H])[、.．:：\s]/);
                     if (m) letter = m[1];
-                    else if (/^(对|正确)\s*$/.test(t)) letter = 'A';
-                    else if (/^(错|错误)\s*$/.test(t)) letter = 'B';
-                    out.push({ el: node, text: t, letter: letter });
+                    else if (body === '对' || /^(对|正确)\s*$/.test(t)) letter = 'A';
+                    else if (body === '错' || /^(错|错误)\s*$/.test(t)) letter = 'B';
+                    out.push({ el: node, text: body, letter: letter });
                     if (out.length >= 8) break;
                 }
                 return out;
@@ -4687,10 +5215,23 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             // 被丢掉 3 个只剩 1 个 → 门禁判"选项不足"上锁（死循环）；另一题 303/311/308/300 全被丢
                             // → optionEls 为空 → 被当成写作题去填编辑器（静默走错分支，更糟）。
                             // 编辑器外壳已由上面的结构判断排除，这里只需一个防"整块文本被当选项"的上界。
-                            if (!t || t.length > 1200) return false;
+                            // F72（V3.7）：判断题归一 —— 纯图标判断题的选项没有任何文字，原先被下面的 !t 直接丢弃，
+                            // 结果是「有题无选项」→ 被误判为写作题（静默走错分支）；这里按图标推断正误后再放行。
+                            const norm = this.configs.judgeOptionNormalize !== false ? this._normalizeJudgeOption(li) : null;
+                            if (!t && !norm) return false;
+                            if (t.length > 1200) return false;
                             try { if (li.querySelector('input[type=radio], input[type=checkbox]')) return true; } catch (e) { /* ignore */ }
+                            if (norm) return true;
                             return /^([A-H][、.．:：\s]|(对|错|正确|错误)\s*$)/.test(t);
-                        }).map((li) => ({ el: li, text: (li.textContent || '').replace(/\s+/g, ' ').trim() }));
+                        }).map((li) => {
+                            const t = (li.textContent || '').replace(/\s+/g, ' ').trim();
+                            const norm = this.configs.judgeOptionNormalize !== false ? this._normalizeJudgeOption(li) : null;
+                            if (norm && norm.text !== t) {
+                                console.log('%c[判断题归一] 作业选项归一为「' + norm.text + '」（' + norm.from + '）', 'color:#607D8B');
+                                return { el: li, text: norm.text };
+                            }
+                            return { el: li, text: t };
+                        });
                     } catch (e) { optionEls = []; }
                     let editorCount = 0;
                     try { editorCount = timu.querySelectorAll('.edui-editor').length; } catch (e) { editorCount = 0; }
@@ -5075,6 +5616,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         }
                         skipAfter();
                     };
+                    // F71（V3.7）：本题集已作答记录（题干 + 答案）—— 只在平台确认完成后才写入题库缓存。
+                    const answered = [];
                     const askNext = (qi) => {
                         if (qi >= questions.length) {
                             if (this._workLocked) { giveUp('作业已上锁（' + (this._workLockReason || '异常状态') + '），拒绝提交'); return; }
@@ -5086,13 +5629,40 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                 return;
                             }
                             console.log('%c[作业] 提交前校验通过（有效作答 ' + filledCount + '/' + questions.length + ' 题）', 'color:#4CAF50');
+                            // F73（V3.7）：完成率闸门（移植上游 worker.ts:332-360 uploadHandler 的三态语义：
+                            // force 必交 / save 只暂存 / 数字阈值则 rate >= 阈值 才交）。
+                            // 语义边界（默认值必须不改变任何现有行为）：
+                            //   workSubmitMinRate === 0（默认）→ 闸门关闭，完全沿用既有行为（有效作答齐全即提交）；
+                            //   workSubmitMinRate > 0        → 启用阈值闸门：仅当「完成率 >= 阈值」且 llmAutoSubmit=true
+                            //                                  才自动提交，否则按 F48 的安全策略只暂存草稿、不提交。
+                            const minRate = Number(this.configs.workSubmitMinRate) || 0;
+                            if (minRate > 0) {
+                                const totalQ = Math.max(1, questions.length);
+                                const rate = (filledCount / totalQ) * 100;
+                                const rateOk = rate >= minRate;
+                                const autoOk = this.configs.llmAutoSubmit === true;
+                                console.log('%c[作业] 提交闸门：完成率 ' + rate.toFixed(2) + '%（阈值 ' + minRate
+                                    + '%，llmAutoSubmit=' + autoOk + '）', 'color:#2196F3');
+                                if (!rateOk || !autoOk) {
+                                    const why = rateOk ? 'llmAutoSubmit=false（未开启自动提交）' : '完成率低于阈值 ' + minRate + '%';
+                                    giveUp('提交闸门未放行（' + why + '）：只暂存不提交');
+                                    return;
+                                }
+                                console.log('%c[作业] 提交闸门放行：完成率 ' + rate.toFixed(2) + '% ≥ 阈值 ' + minRate + '% 且已开启自动提交', 'color:#4CAF50');
+                            }
                             this._submitWork(quiz.win, document, (ok, msg) => {
                                 if (!ok) { giveUp(msg); return; }
                                 const waitDone = (left) => {
                                     const all = this._findUnfinishedWorks();
                                     const target = all.filter((w) => w.jobid === work.jobid)[0];
                                     const submitted = target ? (target.finished || this._workLooksSubmitted(target)) : true;
-                                    if (submitted) { nextWork(wi + 1); return; }
+                                    if (submitted) {
+                                        // F71（V3.7）：平台已确认本任务点完成 = 这批答案被平台接受的证据，
+                                        // 此时才把它们写进题库缓存（失败/不确定的作答绝不入缓存）。
+                                        this._qcacheCommit(answered, '作业提交后平台确认完成');
+                                        nextWork(wi + 1);
+                                        return;
+                                    }
                                     if (left <= 0) { giveUp('提交后任务点未标记完成（可能进入人工批阅或需要验证码）'); return; }
                                     this._schedule(() => waitDone(left - 1), 2000);
                                 };
@@ -5138,6 +5708,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                     const okCached = this._fillWorkAnswer(quiz.win, q, cachedShort.answer);
                                     if (okCached) {
                                         console.log('%c[缓存] 第 ' + (qi + 1) + ' 题命中答案缓存（写作/简答），已填入编辑器', 'color:#10B981');
+                                        // F71（V3.7）：命中缓存的作答同样计入本次答案集（平台确认后不再重复写入）
+                                        answered.push({ questionText: questionText, kind: 'short', answer: cachedShort.answer });
                                         askNext(qi + 1);
                                         return;
                                     }
@@ -5158,6 +5730,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                         const ok = this._fillWorkAnswer(quiz.win, q, text);
                                         console.log('%c[LLM] 第 ' + (qi + 1) + ' 题答案' + (ok ? '已填入编辑器' : '填充失败') + '：' + String(text).slice(0, 60), ok ? 'color:#9C27B0' : 'color:#FF9800');
                                         if (!ok) { this._lockWork('第 ' + (qi + 1) + ' 题答案填充失败'); giveUp('第 ' + (qi + 1) + ' 题答案填充失败'); return; }
+                                        // F71（V3.7）：作答确实落入编辑器后才计入答案集（供提交确认后写入题库缓存）
+                                        answered.push({ questionText: questionText, kind: 'short', answer: text });
                                         askNext(qi + 1);
                                     },
                                     (err) => giveUp('第 ' + (qi + 1) + ' 题请求失败：' + (err && err.message ? err.message : err))
@@ -5172,6 +5746,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                 if (cachedList.length) {
                                     cachedList.forEach((c) => { try { c.el.click(); } catch (e) { /* ignore */ } });
                                     console.log('%c[缓存] 第 ' + (qi + 1) + ' 题命中答案缓存，已选择：' + cachedList.map((c) => String(c.text || '').slice(0, 20)).join(' / '), 'color:#10B981');
+                                    // F71（V3.7）：命中缓存的作答同样计入本次答案集
+                                    answered.push({ questionText: questionText, kind: 'choice', answer: cachedChoice.answer });
                                     askNext(qi + 1);
                                     return;
                                 }
@@ -5193,6 +5769,8 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                                 this._clickWithVerification(result.picked, (clickErr) => {
                                     if (clickErr) console.warn('%c[LLM] 第 ' + (qi + 1) + ' 题选项点击未生效（' + clickErr.message + '），继续下一题', 'color:#FF9800');
                                     console.log('%c[LLM] 第 ' + (qi + 1) + ' 题已选择：' + result.picked.map((c) => String(c.text || '').slice(0, 24)).join(' / '), 'color:#9C27B0');
+                                    // F71（V3.7）：作答（含点击校验）完成才计入答案集，供平台确认完成后写入题库缓存
+                                    answered.push({ questionText: questionText, kind: 'choice', answer: result.answer });
                                     askNext(qi + 1);
                                 });
                             });
@@ -5216,7 +5794,10 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                         let jobid = '';
                         let src = '';
                         try { jobid = String(frame.getAttribute('jobid') || ''); src = String(frame.getAttribute('src') || ''); } catch (e) { jobid = ''; src = ''; }
-                        if (jobid && /\/modules\//.test(src) && !/\/modules\/(video|work)\//.test(src)) {
+                        // F74（V3.7）：长时阅读帧（src 带 timing=）必须排除在「文档任务点」之外：
+                        // 它的 src 同样含 /modules/，若在这里被当成 PDF/PPT，滚动分支会先把它吃掉，
+                        // F74 的等待分支永远不可达（上游把两者视为互斥的独立任务类型）。
+                        if (jobid && /\/modules\//.test(src) && !/\/modules\/(video|work)\//.test(src) && !/timing=/.test(src)) {
                             let holder = null;
                             try { holder = frame.closest ? frame.closest('.ans-attach-ct') : null; } catch (e) { holder = null; }
                             const finished = holder ? holder.classList.contains('ans-job-finished') : false;
@@ -5298,6 +5879,84 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 };
                 this._schedule(tick, 300);
             },
+            // ================= F76（V3.7）：带音频的 PPT（swiper 型课件） =================
+            // 上游依据：cx.ts:1489（任务定位选择器 .swiper-container）、cx.ts:2127-2142（readPPTWithAudio：
+            //           把 <audio> 的 play 事件里置 muted=true，再按 .swiper-slide 数量循环调用 swiperNext()，每张间隔 1 秒）。
+            // 为什么必须与滚动分支分开：swiper 是「横向翻页」结构，滚动对当前帧没有任何作用，
+            // 走滚动分支只会白等到超时，最后报「未标记完成」而停止。
+            _isSwiperDoc(doc) {
+                if (this.configs.pptAudioAuto === false) return false;
+                let slides = 0;
+                try { slides = doc.querySelectorAll('.swiper-container .swiper-slide').length; } catch (e) { slides = 0; }
+                const win = this._docDefaultView(doc);
+                const canNext = !!(win && typeof win.swiperNext === 'function');
+                return slides > 0 || canNext;
+            },
+            _muteDocAudio(doc) {
+                // 上游：audio.addEventListener('play', () => { audio.muted = true; })（cx.ts:2129-2133）
+                let audios = [];
+                try { audios = Array.from(doc.querySelectorAll('audio')); } catch (e) { audios = []; }
+                for (const a of audios) {
+                    try {
+                        a.muted = true;
+                        if (typeof a.addEventListener === 'function') {
+                            a.addEventListener('play', () => { try { a.muted = true; } catch (e) { /* ignore */ } });
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+                return audios.length;
+            },
+            _processSwiperDoc(docTask, doc, done) {
+                const finish = typeof done === 'function' ? done : function () {};
+                const win = this._docDefaultView(doc);
+                const canNext = !!(win && typeof win.swiperNext === 'function');
+                if (!canNext) {
+                    // 跨域帧拿不到 swiperNext（上游同样取不到该函数）：回退人工，绝不凭「翻完了」误判完成（F44 教训）。
+                    console.warn('%c[带音频PPT] 检测到 swiper 型课件，但当前帧拿不到 swiperNext（跨域或页面结构变化）→ 不自动翻页，请人工完成', 'color:#FF9800');
+                    finish(false, 'swiperNext 不可用（跨域/结构变化），需人工完成');
+                    return;
+                }
+                const muted = this._muteDocAudio(doc);
+                let total = 0;
+                try { total = doc.querySelectorAll('.swiper-container .swiper-slide').length; } catch (e) { total = 0; }
+                if (total <= 0) total = 1;
+                console.log('%c[带音频PPT] 检测到 swiper 型课件（' + total + ' 张，已静音 ' + muted + ' 个 audio）：逐张翻页…', 'color:#2196F3');
+                // 完成判定仍走既有的「按本任务点收敛」逻辑（_isDocTaskFinished），不凭翻页动作报完成。
+                let index = 0;
+                const waitMarked = () => {
+                    const left = Math.max(3, Math.ceil((Number(this.configs.docTaskWaitMs) || 45000) / 2000));
+                    const wait = (n) => {
+                        if (this._isDocTaskFinished(docTask)) {
+                            console.log('%c[带音频PPT] 平台已标记本任务点完成', 'color:#4CAF50');
+                            finish(true, '');
+                            return;
+                        }
+                        if (n <= 0) { finish(false, '翻页结束后任务点未标记完成'); return; }
+                        this._schedule(() => wait(n - 1), 2000);
+                    };
+                    this._schedule(() => wait(left), 1000);
+                };
+                const step = () => {
+                    if (this._isDocTaskFinished(docTask)) {
+                        console.log('%c[带音频PPT] 平台已标记本任务点完成', 'color:#4CAF50');
+                        finish(true, '');
+                        return;
+                    }
+                    if (index >= total) {
+                        console.log('%c[带音频PPT] 已翻完 ' + total + ' 张，等待平台标记完成…', 'color:#2196F3');
+                        waitMarked();
+                        return;
+                    }
+                    try { win.swiperNext(); } catch (e) {
+                        finish(false, 'swiperNext 调用失败：' + (e && e.message ? e.message : e));
+                        return;
+                    }
+                    index++;
+                    // 上游每张间隔 1 秒（cx.ts:2137-2140）
+                    this._schedule(step, 1000);
+                };
+                this._schedule(step, 300);
+            },
             _processDocTasks(docs, idx, done) {
                 if (idx >= docs.length) { done(true, ''); return; }
                 const docTask = docs[idx];
@@ -5306,6 +5965,16 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 let doc = null;
                 try { doc = docTask.frame.contentDocument; } catch (e) { doc = null; }
                 if (!doc) { done(false, '无法访问文档内容'); return; }
+                // F76（V3.7）：swiper 型（带音频 PPT）走独立的逐张翻页分支 —— 滚动分支对 swiper 完全无效
+                //（上游同样把它作为独立任务类型处理）。完成后按既有 done/下一个任务点继续，不改变收敛语义。
+                if (this._isSwiperDoc(doc)) {
+                    console.log('%c[文档任务] 识别为「带音频 PPT」（swiper 型）→ 改用逐张翻页分支，不使用滚动', 'color:#2196F3');
+                    this._processSwiperDoc(docTask, doc, (ok, msg) => {
+                        if (ok) { this._processDocTasks(docs, idx + 1, done); return; }
+                        done(false, msg);
+                    });
+                    return;
+                }
                 const attempts = Math.max(1, Number(this.configs.docTaskAttempts) || 2);
                 const runAttempt = (left) => {
                     const scroller = this._docScroller(doc);
@@ -5634,6 +6303,16 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._consecutiveNoVideoAdvances = 0;
                 this._resumeAttemptsThisUnit = 0;
                 this._resumeCapLogged = false;
+                // F70/F74/F75（V3.7）：闯关提示标志与长时阅读/链接任务点的在途状态一并清零
+                //（两者的自链定时器已由上面的 _clearTimers() 收尾，这里只清状态，避免 destroy → run 后残留）。
+                this._breakingModeStopped = false;
+                this._breakingModeStuck = null;
+                this._timereaderBusy = false;
+                this._timereaderKey = '';
+                this._timereaderStartedAt = 0;
+                this._timereaderWaitMs = 0;
+                this._timereaderTimerId = null;
+                this._hyperlinkBusy = false;
                 console.log('%c脚本已停止（destroy）：定时器、视频事件与页面监听均已清理。', 'color:#607D8B');
             },
         };

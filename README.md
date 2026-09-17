@@ -140,6 +140,15 @@ llmChapterTest: false
 llmEmbeddedWork: false
 llmWorkWaitMs: 90000
 workDraftOnUncertain: true
+breakingModeGuard: true
+breakingModeStuckThreshold: 3
+questionCacheEnabled: true
+questionCacheMax: 500
+judgeOptionNormalize: true
+workSubmitMinRate: 0
+timereaderAuto: true
+hyperlinkAuto: true
+pptAudioAuto: true
 ```
 
 关键项说明：
@@ -178,6 +187,13 @@ workDraftOnUncertain: true
 - `chapterStudyCount`（默认 **0**，V3.6 补丁 F36）：>0 时按上游流程增加章节学习次数（`studentstudyAjax` → setlog）；`chapterStudyDelayMs` 控制间隔（默认 2500ms）。需要 HTTP 传输：油猴版走 GM_xmlhttpRequest，控制台/演练由宿主注入 `app.setHttpTransport(fn)`。
 - `workSanityLock`（默认 **true**，V3.6 新增）：题目合格性预检 + 提交锁。给 AI 发请求前先校验题目（排除界面文案/过短/选项不足等异常），异常或未全部作答时**上锁拒绝提交**，交人工处理（修复真机演练中「编辑器外壳被当选项 → 提交空值」事故）。
 - `docTaskScroll`（默认 **true**，V3.6 补丁 F33 起默认开启；V3.6 新增）：文档任务点（PDF/PPT/教案）自动翻阅：自动把文档滚动到底部并等待平台标记完成。如需关闭（例如担心翻页节奏），设 `docTaskScroll = false`，此时检测到未完成文档任务点会**停止前进并提示**（绝不跳过）。
+- `breakingModeGuard` / `breakingModeStuckThreshold`（默认 **true** / **3**，V3.7 移植 F70，上游 `cx.ts:1087-1114`，调用点 `cx.ts:1346-1351`）：闯关/解锁模式识别与卡死兜底。平台用 `.catalog_points_sa` / `.catalog_points_er`（小旗帜图标）标记这类课程，它们必须按顺序解锁；卡在「章节测验未完成」时平台会反复把进度拉回同一节点，自动推进无法绕过。脚本在同一节点被反复进入达到阈值次数时，打印「检测到闯关模式…请手动完成章节测验」并**安全停止**（释放导航锁），不再空转。计数用**实例内字段**（键＝激活节点 id，退化到标题），不挂在 DOM 元素上（平台会重绘组件导致属性丢失），也不跨会话累积；`run()` 时清空。
+- `questionCacheEnabled` / `questionCacheMax`（默认 **true** / **500**，V3.7 移植 F71，上游 `common.ts:1391-1453`）：题库缓存复用。**先查缓存 → 命中直接复用、跳过 LLM 请求 → 未命中才走 LLM**。缓存写在**页面侧会话存储**里（标签页级、各账号彼此独立；本项目账号隔离是特性，不做跨账号共享），任何存储异常（隐私模式/被禁用/配额满/脏数据）都静默退回纯内存。**只有平台已确认的答案才会入缓存**：互动题等平台回显「已答对」、作业等平台把任务点标记为完成；失败或不确定的作答一律不写。存储不可用时仅内存生效，功能不受影响。
+- `judgeOptionNormalize`（默认 **true**，V3.7 移植 F72，上游 `cx.ts:2051-2076`）：判断题选项归一。英语判断题的 `True` / `False`、香港繁体 `對` / `錯`、以及**只有 `.ri` 图标、没有任何文字**的纯图标判断题，原先都过不了选项过滤器——前者会导致「答案匹配不上」，后者会让整道题被误判成写作题（静默走错分支）。开启后按上游同一套标记归一为「对」「错」，纯图标题按图标推断正误，并打印 `[判断题归一]` 日志说明归一了什么，便于真机核对。与上游的差异：**只做提取层归一，不改写页面 DOM**（避免污染平台提交时读取的选项文本）。
+- `workSubmitMinRate`（默认 **0**，V3.7 移植 F73，上游 `worker.ts:332-360`）：作业自动提交的**完成率闸门**。`0` = 闸门关闭，**完全保持既有行为**（每道题都有有效作答即提交）；设为 `1~100` 才启用阈值：**仅当实际完成率 ≥ 该阈值、并且 `llmAutoSubmit` 为 `true` 时**才自动提交，否则走 F48 的安全策略——**只暂存草稿、不提交**（`workDraftOnUncertain=true` 时）。**风险提示**：这是安全敏感项。把阈值调低（例如 50）意味着「一半题目没答上也会交卷」；把 `llmAutoSubmit` 设为 `true` 则意味着脚本会替你按下提交按钮。默认值刻意保守（0 + 不自动提交），建议先在半自动档观察几份作业再决定。
+- `timereaderAuto`（默认 **true**，V3.7 移植 F74，上游 `cx.ts:1491` 定位 + `cx.ts:1802-1813` 等待）：长时阅读任务点（`iframe[name="bookifame"][src*="timing"]`）。这类节点靠阅读时长由平台自己标记完成，脚本解析 `timing` 参数（取不到按上游默认 60）并等待 `(timing+3)*3` 秒。等待用自链定时器登记在册（`destroy()` 可清理），重复进入不会重复计时；等待结束后**必须确认平台已标记完成**（复用 `_countUnfinishedTaskPoints()`），确认不了就走安全停止，绝不硬跳下一节。
+- `hyperlinkAuto`（默认 **true**，V3.7 移植 F75，上游 `cx.ts:1490` 定位 + `cx.ts:2146-2155` 处理）：链接任务点（`#hyperlink`）。上游做法是「把 `a.onclick` 换成返回 `false` 的函数 → 点击 → 还原」，**但这对 `addEventListener` 注册的监听器无效**（它们照常执行，仍可能弹窗或跳走）；本实现额外在捕获阶段用 DOM0 的 `returnValue=false` 否决默认行为，并在点击期间临时接管窗口的 `open` / `alert` / `confirm` / `prompt`，现场在 `finally` 里完整还原。点击后同样要确认平台标记，确认不了则安全停止。宿主侧类型分类器（`app/src/injector.js`）尚未同步这个类型，宿主扫码统计可能把这类节点计入 other（不影响本脚本）。
+- `pptAudioAuto`（默认 **true**，V3.7 移植 F76，上游 `cx.ts:1489` 定位 + `cx.ts:2127-2142` 处理）：带音频的 PPT（swiper 型课件）。识别到 `.swiper-container .swiper-slide` 或可调用的 `doc.defaultView.swiperNext` 时，改走「静音 `<audio>` + 逐张 `swiperNext()`（每张间隔 1 秒）」分支——**滚动对 swiper 没有任何作用**，走滚动分支只会白等到超时。跨域帧拿不到 `swiperNext` 时回退人工，**不凭「翻完了」报完成**；完成判定仍走既有的按本任务点收敛逻辑（`_isDocTaskFinished`）。
 - `discussTaskAuto`（默认 **true**，V3.6 F45 新增）：讨论任务点（insertbbs/BBS）自动参与。平台完成条件是该话题下有本人回复（服务端 `isFinished`），脚本会取话题页解析 `urlToken` 后提交一条回复，再重载讨论卡片让平台自己把任务点标记完成——**不会伪造完成状态**。回复文本优先由 LLM 依据话题内容生成；未开启 LLM 时须先设置 `discussReplyText`（固定文本），否则**拒绝提交并停止前进**（绝不跳过）。跨域取话题页/提交依赖 `GM_xmlhttpRequest`（油猴版已声明 `@connect groupweb.chaoxing.com`）；控制台/演练环境可用 `app.setHttpTransport((url, cb, opts) => …)` 注入并支持 `opts.method='POST'`，演练启动器 `tmp-verify/conductor.mjs` 已内置 **CDP 宿主 HTTP 桥**（页面经 `Runtime.addBinding` 请求 → Node 在同源 helper 标签页内 `fetch`，同源无 CORS、自动带 cookie），故演练可完整验证该链路。
 ## 使用方法
 
