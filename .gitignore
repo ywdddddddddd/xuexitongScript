@@ -26,3 +26,6 @@ pnpm-lock.yaml
 *.njsproj
 *.sln
 *.sw?
+
+# 临时探针/补丁脚本（验证后即删，不应入库）
+tmp-*.mjs
