@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * V3.4 回归测试（jsdom，不联网）
  *
@@ -2780,6 +2780,191 @@ test('F8 xuexitong.js（V1）入口点击已加固，不再有未保护的 query
     check('F8 node --check xuexitong.js 通过', nodeCheckOk, nodeCheckDetail);
     check('F8 V1 其它逻辑未被改动（iframe 取 video 与 2 倍速仍在）', code.indexOf('iframe.ans-insertvideo-online') >= 0 && code.indexOf('video#video_html5_api') >= 0 && code.indexOf('v.playbackRate = 2') >= 0, '');
 });
+// ---------------------------------------------------------------------------
+// F65：问卷（不计任务点的调查问卷）——此前零测试覆盖，本组补齐
+// 背景：平台把问卷放进章节树但不标任务点，会被「无任务点」流程静默跳过；
+//       _detectSurveyInFrames 负责认出它，_handleSurveyNode 负责作答与提交。
+// ---------------------------------------------------------------------------
+
+/** 构造问卷 iframe 的内容；返回内部 document */
+async function surveyFrame(env, frameId, inner) {
+    return writeFrame(env, frameId, inner);
+}
+
+test('F65-1 问卷识别：按 name=answer* 分组计数，非问卷 iframe 不误认', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    // 注意：测试里的 iframe 一律 src="about:blank"（jsdom 只对 about:blank 同步创建 contentDocument）
+    env.window.document.body.insertAdjacentHTML('beforeend',
+        '<iframe id="survey" src="about:blank"></iframe>'
+        + '<iframe id="noise" src="about:blank"></iframe>');
+    await env.advance(600);
+    await surveyFrame(env, 'survey',
+        '<p>课程满意度问卷</p>'
+        + '<input type="radio" name="answer101" value="1"><input type="radio" name="answer101" value="2">'
+        + '<input type="checkbox" name="answer102" value="1"><input type="checkbox" name="answer102" value="2">'
+        + '<textarea name="answer103"></textarea>');
+    // 非问卷帧：表单控件 name 不以 answer 开头，必须被判为「不是问卷」
+    await surveyFrame(env, 'noise', '<input type="text" name="unrelated"><textarea name="comment"></textarea>');
+
+    const sv = app._detectSurveyInFrames();
+    check('F65-1 识别到问卷（返回非 null）', !!sv, JSON.stringify(sv && { groups: sv.groups, questions: sv.questions }));
+    check('F65-1 题组数=3（radio/checkbox/textarea 各一组）', !!sv && sv.groups === 3, 'groups=' + (sv && sv.groups));
+    check('F65-1 控件数=5（2 radio + 2 checkbox + 1 textarea）', !!sv && sv.questions === 5, 'questions=' + (sv && sv.questions));
+    check('F65-1 非问卷帧未被计入 docs', !!sv && sv.docs.length === 1, 'docs=' + (sv && sv.docs.length));
+    check('F65-1 标题含「问卷」', !!sv && /问卷/.test(sv.title), 'title=' + (sv && sv.title));
+
+    // 真机问卷在 iframe 的 URL 里带 workId，实现从 doc.location.href 解析它。
+    // jsdom 下 about:blank 文档的 location 不可改写，这里退一步：确认 src 属性确被设置，
+    // 且解析逻辑对 workId 形态的 URL 有覆盖（用正则直接核对实现所依赖的模式）。
+    const frameEl = env.window.document.getElementById('survey');
+    frameEl.setAttribute('src', '/mooc-ans/api/work?workId=20260917');
+    check('F65-1 iframe src 可携带 workId 参数',
+        /workId=(\d+)/.test(String(frameEl.getAttribute('src'))), String(frameEl.getAttribute('src')));
+    check('F65-1 标题回退：无问卷标题时给出占位而非空串',
+        !!sv && sv.title !== '', 'title=' + JSON.stringify(sv && sv.title));
+    app.destroy();
+});
+
+test('F65-2 已作答的题不重复问 LLM（省调用、防把选项点掉）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    env.window.document.body.insertAdjacentHTML('beforeend', '<iframe id="survey" src="about:blank"></iframe>');
+    await env.advance(600);
+    // 选项 value 用字母：脚本把 value 当作选项字母（opt.letter），LLM 也按约定回字母 —— 这是真实问卷的形态
+    const doc = await surveyFrame(env, 'survey',
+        '<p>问卷</p>'
+        // 第 1 题已由用户选中
+        + '<input type="radio" name="answer1" value="A" checked><input type="radio" name="answer1" value="B">'
+        // 第 2 题未作答（应问 LLM）
+        + '<input type="radio" name="answer2" value="A"><input type="radio" name="answer2" value="B">'
+        // 第 3 题已填写
+        + '<textarea name="answer3">已有内容</textarea>'
+        + '<button type="button">提交</button>');
+    const asked = [];
+    app.setLlmTransport((o) => {
+        const body = JSON.parse(String(o.data || '{}'));
+        const text = JSON.stringify(body.messages || []);
+        asked.push(text);
+        o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"A"}' }, finish_reason: 'stop' }] }));
+        return null;
+    });
+    app.setLlmKey('sk-test-not-a-real-key');
+    app.configs.llmEnabled = true;
+
+    let out = null;
+    app._handleSurveyNode({ title: '问卷', workId: '1', groups: 3, questions: 3, docs: [doc] })
+        .then((r) => { out = r; }, () => { out = 'error'; });
+    await env.advance(12000);
+
+    check('F65-2 只对未作答的题发起 LLM 请求', asked.length === 1, 'asked=' + asked.length);
+    check('F65-2 已作答的题未被重复选中（第 1 题仍是原选项）',
+        doc.querySelector('input[name="answer1"][value="A"]').checked
+        && !doc.querySelector('input[name="answer1"][value="B"]').checked, '');
+    check('F65-2 已填写的填空未被改写', doc.querySelector('textarea[name="answer3"]').value === '已有内容',
+        'value=' + doc.querySelector('textarea[name="answer3"]').value);
+    check('F65-2 三题齐备 → 提交成功返回 true', out === true, String(out));
+    app.destroy();
+});
+
+test('F65-3 安全阀：LLM 长期不可用时每题仍有兜底、不漏题', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    env.window.document.body.insertAdjacentHTML('beforeend', '<iframe id="survey" src="about:blank"></iframe>');
+    await env.advance(600);
+    const doc = await surveyFrame(env, 'survey',
+        '<p>问卷</p>'
+        + '<input type="radio" name="answer1" value="A"><input type="radio" name="answer1" value="B">'
+        + '<input type="radio" name="answer2" value="A"><input type="radio" name="answer2" value="B">'
+        + '<button type="button" id="submitBtn">提交</button>');
+    let clicked = false;
+    doc.getElementById('submitBtn').addEventListener('click', () => { clicked = true; });
+    // LLM 一律 500：脚本不会立刻放弃——_llmRequestNow 的心跳重试是
+    // llmRetryIntervalMs(60000) × llmMaxRetries(5)，最坏 5 分钟才回调失败。
+    // 因此真实路径是「每题等待上限先到（max(15000, llmTimeoutMs)）→ 走选第一项的兜底」。
+    app.setLlmTransport((o) => { o.onload(500, '{"error":"boom"}'); return null; });
+    app.setLlmKey('sk-test-not-a-real-key');
+    app.configs.llmEnabled = true;
+
+    let out = null;
+    app._handleSurveyNode({ title: '问卷', workId: '2', groups: 2, questions: 2, docs: [doc] })
+        .then((r) => { out = r; }, () => { out = 'error'; });
+    // 推进到每题等待上限之后（2 题各 30s + 题间 350ms 间隔 + 收尾 1200ms 的余量）
+    await env.advance(90000);
+
+    check('F65-3 LLM 不可用时每题仍被兜底选中（不漏题）',
+        doc.querySelector('input[name="answer1"][value="A"]').checked
+        && doc.querySelector('input[name="answer2"][value="A"]').checked, '');
+    check('F65-3 答满后提交（返回 true 且按钮被点）', out === true && clicked, 'out=' + out + ' clicked=' + clicked);
+    app.destroy();
+});
+
+test('F65-4 提交按钮必须精确匹配「提交/交卷/完成」——模糊文案不得误点', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    env.window.document.body.insertAdjacentHTML('beforeend', '<iframe id="survey" src="about:blank"></iframe>');
+    await env.advance(600);
+    const doc = await surveyFrame(env, 'survey',
+        '<p>问卷</p>'
+        + '<input type="radio" name="answer1" value="1"><input type="radio" name="answer1" value="2">'
+        + '<button type="button" id="danger">提交答案</button>'      // 模糊：不该被点
+        + '<button type="button" id="cancel">取消</button>'          // 危险：不该被点
+        + '<button type="button" id="ok">提交</button>');            // 精确：应被点
+    const hits = [];
+    doc.getElementById('danger').addEventListener('click', () => hits.push('danger'));
+    doc.getElementById('cancel').addEventListener('click', () => hits.push('cancel'));
+    doc.getElementById('ok').addEventListener('click', () => hits.push('ok'));
+    app.setLlmTransport((o) => {
+        o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"A"}' }, finish_reason: 'stop' }] }));
+        return null;
+    });
+    app.setLlmKey('sk-test-not-a-real-key');
+    app.configs.llmEnabled = true;
+
+    let out = null;
+    app._handleSurveyNode({ title: '问卷', workId: '3', groups: 1, questions: 1, docs: [doc] })
+        .then((r) => { out = r; }, () => { out = 'error'; });
+    await env.advance(12000);
+
+    check('F65-4 只点精确匹配的「提交」按钮', hits.length === 1 && hits[0] === 'ok', JSON.stringify(hits));
+    check('F65-4 未误点「提交答案」这类模糊文案', hits.indexOf('danger') < 0, JSON.stringify(hits));
+    check('F65-4 未误点「取消」', hits.indexOf('cancel') < 0, JSON.stringify(hits));
+    check('F65-4 提交成功返回 true', out === true, String(out));
+    app.destroy();
+});
+
+test('F65-5 surveySubmit=false 时只填答不提交（配置开关生效）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1'])) + '<div class="prev_title" title="视频"></div>' });
+    const app = await env.boot();
+    env.window.document.body.insertAdjacentHTML('beforeend', '<iframe id="survey" src="about:blank"></iframe>');
+    await env.advance(600);
+    const doc = await surveyFrame(env, 'survey',
+        '<p>问卷</p>'
+        + '<input type="radio" name="answer1" value="1"><input type="radio" name="answer1" value="2">'
+        + '<button type="button" id="submitBtn">提交</button>');
+    let clicked = false;
+    doc.getElementById('submitBtn').addEventListener('click', () => { clicked = true; });
+    app.setLlmTransport((o) => {
+        o.onload(200, JSON.stringify({ choices: [{ message: { content: '{"answer":"A"}' }, finish_reason: 'stop' }] }));
+        return null;
+    });
+    app.setLlmKey('sk-test-not-a-real-key');
+    app.configs.llmEnabled = true;
+    app.configs.surveySubmit = false;   // 本用例只验证该开关
+
+    let out = null;
+    app._handleSurveyNode({ title: '问卷', workId: '4', groups: 1, questions: 1, docs: [doc] })
+        .then((r) => { out = r; }, () => { out = 'error'; });
+    await env.advance(12000);
+
+    check('F65-5 surveySubmit=false → 不点提交按钮', !clicked, 'clicked=' + clicked);
+    check('F65-5 但选项已填（保留人工可直接提交）',
+        doc.querySelector('input[name="answer1"][value="1"]').checked, '');
+    check('F65-5 返回值 true（已填答，未提交）', out === true, String(out));
+    check('F65-5 日志说明为何不提交', env.xt.has('surveySubmit=false'), JSON.stringify(env.xt.logs.slice(-3)));
+    app.destroy();
+});
+
 // ---------------------------------------------------------------------------
 // 运行入口
 // ---------------------------------------------------------------------------

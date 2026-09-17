@@ -114,6 +114,10 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 retryInterval: 2000,
                 maxRetries: 10,
                 videoCheckInterval: 1000,
+                // F66（V3.7）：视频加载失败的显式跳过（移植上游 cx.ts:1742-1753）。
+                // 平台播放器在片源损坏/格式不支持/网络中断时，会在 .vjs-modal-dialog-content 里给出四条中文文案之一；
+                // 这类失败**重试无法恢复**，原先会白烧 maxRetries 次重试。开启后命中即记日志并按既有推进路径跳走。
+                videoFailTextSkip: true,
                 guardNoProgressMs: 7000,
                 guardResumeCooldownMs: 1500,
                 guardPausedGraceMs: 1200,
@@ -130,11 +134,18 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 videoFrameMaxDepth: 4,
                 interactionGuard: true,
                 interactionPollMs: 1500,
+                // F68（V3.7）：人脸识别的检测与等待（移植上游 cx.ts:2221-2246 / 2250-2300 / 1757-1758）。
+                // 命中后暂停自动推进并提示人工完成（只提示一次），人脸消失后自动恢复播放；无超时，一直等人工。
+                interactionFaceWait: true,
                 // 思路移植自 PR #48 @CsuCook1e：任务点弹窗节流与视频任务点上限（本仓库额外加了次数上限，防止异常页面下无限点）
                 taskDialogClickCooldownMs: 8000,
                 taskDialogMaxClicksPerUnit: 3,
                 videoTaskFrameMaxDepth: 4,
                 videoTaskFrameMaxCount: 12,
+                // F67（V3.7）：章节未完成数的第二数据源交叉校验（移植上游 cx.ts:1138-1145 getChapterInfos）。
+                // 服务端在章节 onclick 与同级 input.jobUnfinishCount 里维护未完成数；与本地 DOM 统计对照，
+                // 用于提前发现平台改版。只做交叉校验与日志，不替换既有完成判定的主口径。
+                chapterCountCrossCheck: true,
                 // F24（V3.6 补丁，实验特性）：同节点多视频并发播放（错开启动 + 副车道保活重播）。
                 // 真机实测：平台会周期性暂停副车道，重播可拉回；并发的第二路 206/218s 被平台正常标记完成。
                 concurrentPlayback: false,
@@ -321,6 +332,11 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._tryTimes = 0;
                 this._emptyContentStreak = 0;
                 this._videoRefreshTried = false;
+                // F66/F68（V3.7）：坏片探测记账与人工等待状态随每次启动复位。
+                this._videoFailTextHandledKey = null;
+                this._videoFailTextScanTs = 0;
+                this._faceWaitActive = false;
+                this._faceWaitNotified = false;
                 this._unitCompletionRatio = null;
                 this._currentVideoTaskIndex = 0;
                 this._videoTaskCount = 0;
@@ -364,6 +380,12 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 // 脚本不会自动答题（硬性约束），也不需要在弹窗上反复点击。
                 if (this._interactionBlocked) {
                     console.warn('%c检测到视频互动答题弹窗，已暂停自动跳转（#29 #39）。请手动完成题目，脚本会在弹窗消失后自动继续。', 'color:#FF9800');
+                    return;
+                }
+                // F68（V3.7）：人脸识别期间同样暂停自动跳转。闸门放在导航锁之前（此处 _nextUnitPending 尚未置位），
+                // 因此不需要 _releaseNavLock；即使有其它路径触发 nextUnit()，也不会在人脸未完成时跳走。
+                if (this._faceWaitActive || (this.configs.interactionFaceWait !== false && this._hasFaceRecognition())) {
+                    this._waitForFaceRecognition();
                     return;
                 }
                 // F46（V3.6）：本节点有多个任务点（平台任务点标签页 #prev_tab）且当前显示的那个已完成时，
@@ -730,8 +752,87 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._guardLastTime = Number((this._getVideoEl() || {}).currentTime || 0);
                 console.log('%c已恢复自动保活（resumeAutoPlay）', 'color:#4CAF50');
             },
+            // ================= F66（V3.7）：视频加载失败文案的显式跳过 =================
+            // 上游依据：_ocsjs_upstream/packages/scripts/src/projects/cx.ts:1742-1753
+            //   上游每 3 秒扫 .vjs-modal-dialog-content，命中四条中文文案之一就 resolve() 结束该视频的播放等待。
+            // 本地差异：本地是「有界重试」模型，永久性坏片会白烧 maxRetries 次重试；这里把上游的探测接到
+            // 既有监控链上，命中后不伪造完成标记，只走既有推进路径。
+            _findVideoFailText() {
+                const texts = [
+                    '视频文件损坏',
+                    '网络错误导致视频下载中途失败',
+                    '视频因格式不支持',
+                    '网络的问题无法加载',
+                ];
+                const scan = (doc, depth) => {
+                    if (!doc || depth > this.configs.videoFrameMaxDepth) return null;
+                    let boxes = [];
+                    try { boxes = Array.from(doc.querySelectorAll('.vjs-modal-dialog-content')); } catch (e) { boxes = []; }
+                    for (const box of boxes) {
+                        let text = '';
+                        // 上游读 innerText；无排版环境（jsdom 等）下 innerText 可能取不到，这里回退 textContent。
+                        try { text = String(box.innerText || box.textContent || ''); } catch (e) { text = ''; }
+                        for (const t of texts) {
+                            if (text.indexOf(t) >= 0) return t;
+                        }
+                    }
+                    // 上游只扫顶层文档；本仓库的视频多数在内容帧里，因此按既有帧上限递归（口径与 videoFrameMaxDepth 一致）。
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        let child = null;
+                        try { child = frame.contentDocument; } catch (e) { child = null; }
+                        if (!child) continue;
+                        const hit = scan(child, depth + 1);
+                        if (hit) return hit;
+                    }
+                    return null;
+                };
+                try {
+                    return scan(typeof document === 'undefined' ? null : document, 0);
+                } catch (e) {
+                    return null;
+                }
+            },
+            _maybeSkipOnVideoFailText() {
+                // F66：探测只由既有循环驱动（_checkVideoStatus 的视频监控链 + _startInteractionWatcher 的互动轮询链），
+                // 不新增任何常驻定时器；扫屏节流 3 秒，与上游口径一致。
+                if (this.configs.videoFailTextSkip === false) return false;
+                const now = Date.now();
+                if (now - (this._videoFailTextScanTs || 0) < 3000) return false;
+                this._videoFailTextScanTs = now;
+                const hit = this._findVideoFailText();
+                if (!hit) return false;
+                // 已在等人工（互动答题弹窗 / 人脸识别）时不抢动作：坏片探测让位给人工流程，避免误跳。
+                if (this._interactionBlocked || this._faceWaitActive) return false;
+                // 同一节点 + 同一文案只处理一次（监控循环每秒一次而弹窗会持续存在，必须去重）。
+                const key = hit + '|' + String(this._currentStepTitle() || '') + '|'
+                    + this._cellData.currentCellIndex + '.' + this._cellData.currentNCellIndex;
+                if (this._videoFailTextHandledKey === key) return false;
+                this._videoFailTextHandledKey = key;
+                this._handleUnrecoverableVideo(hit);
+                return true;
+            },
+            _handleUnrecoverableVideo(text) {
+                // F66：不可恢复的视频加载失败 —— 不再重试到底，但仍**绝不伪造完成**：
+                // 这里不添加任何 ans-job-finished 之类的完成标记，只把控制权交回既有推进路径。
+                console.warn('%c[视频跳过] 检测到' + text + '，本任务点标记为不可恢复', 'color:#F44336;font-weight:bold');
+                console.log('处理方法：该片源在服务端已损坏或格式不受支持，重试无法恢复。脚本按既有推进路径继续'
+                    + '（小节内还有未完成的视频任务点时先切任务点，否则跳到下一小节）；该任务点不会被标记完成，'
+                    + '仍需你稍后手动处理或向老师反馈。');
+                this._clearCheckInterval();
+                this._isPlaying = false;
+                this._videoRefreshTried = false;
+                // 复用 _handleVideoEnded 的既有推进路径（小节内未完成视频任务点优先 → 有界延时 nextUnit，
+                // 内含 _handlingVideoEnd 去重、_delayedNextUnitTimer 定时器账本登记与导航锁语义），
+                // 因此不另写一套跳转逻辑，避免与既有语义漂移。
+                this._handleVideoEnded();
+            },
             _checkVideoStatus() {
                 try {
+                    // F66（V3.7）：坏片探测放在 video 判空**之前** —— 播放器报错时可能压根没有可用的 video 元素，
+                    // 若放在判空之后，这个场景永远探测不到。
+                    if (this._maybeSkipOnVideoFailText()) return;
                     const video = this._getVideoEl();
                     if (!video) return;
                     const now = Date.now();
@@ -819,6 +920,15 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
             _tryTimes: 0,
             // F21（V3.6 补丁）：空视频节点（平台内容帧「暂无内容」）连续命中计数，连续 2 次才转入无视频流程。
             _emptyContentStreak: 0,
+            // F66（V3.7）：坏片文案探测状态 —— 扫屏节流时间戳 + 已处理键（同节点同文案只跳过一次）。
+            _videoFailTextScanTs: 0,
+            _videoFailTextHandledKey: null,
+            // F68（V3.7）：人脸识别等待状态 —— 命中后暂停自动推进并只提示一次，人脸消失后自动恢复（由 F68 使用）。
+            _faceWaitActive: false,
+            _faceWaitNotified: false,
+            // F67（V3.7）：章节未完成数交叉校验的日志去重键与最近一次裁决结果（真机排查入口）。
+            _chapterCountCheckKey: '',
+            _lastChapterCountCheck: null,
             // F22（V3.6 补丁）：play() 超时后「强制失效缓存并重新定位」是否已用过（播放成功/切换小节/run 后重置）。
             _videoRefreshTried: false,
             // F23（V3.6 补丁）：本小节「完成条件」文案解析出的比例（如 90% → 0.9）；null=未解析到，按配置回退。
@@ -855,6 +965,15 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 try {
                     if (this._interactionBlocked) {
                         console.warn('%c当前有互动答题弹窗，暂停自动播放，等待手动完成（#29 #39）', 'color:#FF9800');
+                        return;
+                    }
+                    // F68（V3.7）：人脸识别闸门 —— 接入点选在 play() 入口，对齐上游 1757-1758 的语义
+                    //（上游是在 media() 每次保活播放前先检测并 await 等待人脸）。
+                    // 选这里的理由：play() 是 playCurrentIndex / _handleVideoEnded / 保活重试 / GUI 恢复 /
+                    // 静音兜底重试的唯一公共入口，闸门放在这里任何推进路径都绕不过去；
+                    // 若放在 _checkVideoStatus 里，自动跳转链（nextUnit → playCurrentIndex）就不会经过它。
+                    if (this.configs.interactionFaceWait !== false && this._hasFaceRecognition()) {
+                        this._waitForFaceRecognition();
                         return;
                     }
                     const el = this._getVideoEl();
@@ -993,6 +1112,104 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 } catch (e) { /* ignore */ }
                 return null;
             },
+            // ================= F67（V3.7）：章节未完成数的第二数据源与交叉校验 =================
+            // 上游依据：_ocsjs_upstream/packages/scripts/src/projects/cx.ts:1138-1145（getChapterInfos）。
+            // 上游从 [onclick^="getTeacherAjax"] 的 onclick 里用第 3 组正则取 chapterId，
+            // 再读兄弟容器的 .jobUnfinishCount 得到该章未完成数。这里原样移植，作为本地 DOM 统计之外的第二数据源。
+            _getChapterInfos() {
+                const out = [];
+                try {
+                    const els = Array.from(document.querySelectorAll('[onclick^="getTeacherAjax"]'));
+                    for (const el of els) {
+                        let chapterId = null;
+                        try {
+                            const onclick = String(el.getAttribute('onclick') || '');
+                            const m = /\('(.*)','(.*)','(.*)'\)/.exec(onclick);
+                            chapterId = m ? m[3] : null;
+                        } catch (e) { chapterId = null; }
+                        let unFinishCount = null;
+                        try {
+                            const holder = el.parentElement || el.parentNode;
+                            const node = holder && holder.querySelector ? holder.querySelector('.jobUnfinishCount') : null;
+                            if (node && node.value !== '' && node.value !== undefined && node.value !== null) {
+                                unFinishCount = Number(node.value);
+                            }
+                        } catch (e) { unFinishCount = null; }
+                        // 上游只取 chapterId 与未完成数；这里额外标注「当前激活章节」，用于定位要交叉校验的那一章。
+                        let active = false;
+                        try {
+                            const scope = el.closest ? el.closest('li') : null;
+                            active = !!(scope && (scope.classList.contains('posCatalog_active')
+                                || (scope.querySelector && scope.querySelector('.posCatalog_active'))));
+                        } catch (e) { active = false; }
+                        out.push({ element: el, chapterId: chapterId, unFinishCount: unFinishCount, active: active });
+                    }
+                } catch (e) { /* ignore */ }
+                return out;
+            },
+            _crossCheckChapterCount(localTotal, localUnfinished) {
+                // F67：两个层级各比一次，因为「服务端计数」与「本地 DOM 统计」只在同层才可比：
+                //   1) 章节级：激活章的 input.jobUnfinishCount（服务端） vs 该章内所有节点未完成数之和（本地 DOM）；
+                //   2) 任务点级：当前节点 input.jobUnfinishCount（服务端） vs .ans-job-icon 图标级统计（本地）。
+                // 约束（用户明确要求）：两者不一致时**采用服务端计数**并记中文方括号日志；
+                // 但既有推进逻辑的主判定保持原样（本函数只输出裁决值与日志，不替换任何完成判定）。
+                if (this.configs.chapterCountCrossCheck === false) return null;
+                const infos = this._getChapterInfos();
+                if (!infos.length) return null;   // 目录里没有该结构（非课程页或平台改版）→ 不参与判定
+                const current = infos.find((c) => c.active) || null;
+                const serverChapter = current ? current.unFinishCount : null;
+                let localChapter = null;
+                try {
+                    const scope = current && current.element && current.element.closest ? current.element.closest('li') : null;
+                    // 章节自身那个计数（就在 onclick 元素的同级容器里）必须排除，否则会被算两次。
+                    const selfHolder = current && current.element ? (current.element.parentElement || current.element.parentNode) : null;
+                    if (scope) {
+                        const nodes = Array.from(scope.querySelectorAll('.jobUnfinishCount'))
+                            .filter((n) => !(selfHolder && selfHolder.contains && selfHolder.contains(n)));
+                        let sum = 0;
+                        let seen = 0;
+                        for (const n of nodes) {
+                            const v = Number(n.value);
+                            if (Number.isNaN(v)) continue;
+                            sum += v;
+                            seen++;
+                        }
+                        // 一个都没数到时不参与比对（口径不明比错杀更危险）。
+                        if (seen > 0) localChapter = sum;
+                    }
+                } catch (e) { localChapter = null; }
+                const serverNode = this._nodeUnfinishCount();
+                const agree = (serverChapter !== null && localChapter !== null) ? (serverChapter === localChapter) : null;
+                const result = {
+                    chapterId: current ? current.chapterId : null,
+                    serverChapter: serverChapter,
+                    localChapter: localChapter,
+                    serverNode: serverNode,
+                    localNode: localUnfinished,
+                    total: localTotal,
+                    agree: agree,
+                    // 裁决口径：服务端可得就以服务端为准，否则退回本地统计。
+                    unresolved: serverChapter !== null ? serverChapter : localUnfinished,
+                    source: serverChapter !== null ? 'server' : 'local',
+                };
+                // 日志去重：同一组数值只播报一次（本函数会被每个节点/每次校验调用）。
+                const key = [result.chapterId, serverChapter, localChapter, serverNode, localUnfinished, localTotal].join('/');
+                if (this._chapterCountCheckKey !== key) {
+                    this._chapterCountCheckKey = key;
+                    if (agree === false) {
+                        console.warn('%c[章节校验] 服务端未完成 ' + serverChapter + ' 与本地统计 ' + localChapter
+                            + ' 不一致，采用服务端计数', 'color:#FF9800');
+                    } else if (agree === true) {
+                        console.log('%c[章节校验] 服务端未完成 ' + serverChapter + ' 与本地统计一致（chapterId=' + (result.chapterId || '未知') + '）', 'color:#607D8B');
+                    }
+                    if (serverNode !== null && localUnfinished !== null && serverNode !== localUnfinished) {
+                        console.warn('%c[章节校验] 本节任务点：服务端 ' + serverNode + ' 与本地图标级统计 ' + localUnfinished
+                            + ' 不一致，采用服务端计数', 'color:#FF9800');
+                    }
+                }
+                this._lastChapterCountCheck = result;   // 真机排查入口：控制台 app._lastChapterCountCheck
+                return result;
+            },
             _activeTabUnfinished() {
                 // 当前显示的任务点是否还没做完（图标级证据 / 题面 / 文档 / 讨论）
                 try {
@@ -1091,7 +1308,10 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 visit(typeof document === 'undefined' ? null : document, 0);
                 // F46：附带平台在章节树里维护的「本节点未完成数」——能覆盖"任务点标签页未显示、图标不在 DOM"的情况
                 const platformUnfinished = this._nodeUnfinishCount();
-                return { total: total, unfinished: unfinished, platformUnfinished: platformUnfinished };
+                // F67（V3.7）：第二数据源交叉校验（服务端 jobUnfinishCount vs 本地 DOM 统计），结果挂字段输出。
+                // 注意：下面的 total/unfinished 仍按既有主判定口径返回，交叉校验不替换它们（只做校验与日志）。
+                const crossCheck = this._crossCheckChapterCount(total, unfinished);
+                return { total: total, unfinished: unfinished, platformUnfinished: platformUnfinished, crossCheck: crossCheck };
             },
             _isLiveNode() {
                 // F33（V3.6 补丁）：直播任务点识别 —— 直播节点此前会落入无视频流程被当未知节点处理。
@@ -2070,6 +2290,12 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._isPlaying = false;
                 this._emptyContentStreak = 0;
                 this._videoRefreshTried = false;
+                // F66/F68（V3.7）：切到新节点即重置坏片探测记账与人工等待状态
+                // （否则「上一节点已跳过该文案」会把新节点的同类失败也一并去重掉）。
+                this._videoFailTextHandledKey = null;
+                this._videoFailTextScanTs = 0;
+                this._faceWaitActive = false;
+                this._faceWaitNotified = false;
                 this._unitCompletionRatio = null;
                 this._laneReplays = 0;
                 this._laneCapLogged = false;
@@ -2543,12 +2769,90 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 console.log('提示：如需调用大模型自动选择答案，可在控制台执行 app.configs.llmEnabled = true，'
                     + '并用 app.setLlmKey(...) 配置密钥（详见 README「GUI 面板与 LLM 应答」）。');
             },
+            // ================= F68（V3.7）：人脸识别的检测与等待 =================
+            // 上游依据：_ocsjs_upstream/packages/scripts/src/projects/cx.ts:2221-2246（两个判定函数）、
+            // 2250-2300（每 3 秒轮询、notified 标志只提示一次、无超时地等待人工）、
+            // 1757-1758（在每次保活播放前先检测并等待人脸识别）。
+            // 本地不另起一套状态机，而是复用既有「暂停等人工 → 自动恢复」家族：
+            //   * 暂停自动推进 = 清掉待执行跳转 + 停止视频监控（与 _blockInteractionForManual 同一手法）；
+            //   * 自动恢复 = 既有互动轮询链检测到人脸消失后调既有 play()。
+            // 为什么另设 _faceWaitActive 而不复用 _interactionBlocked：_interactionBlocked 的清除分支与
+            // 「互动弹窗是否还在」强绑定，人脸流程若复用它，会在人脸仍在时被那条分支判成「弹窗消失」而调
+            // play() 抢播。因此用同族独立标志，清除条件只有「人脸元素消失」这一个。
+            _hasFaceRecognition() {
+                // 上游语义原样照搬： #fcqrimg 的 src 非空才算激活（src 为空串表示人脸不会出现）；
+                // .chapterVideoFaceMaskDiv 的 style.display 不为 none 才算激活（未显式隐藏即视为激活）。
+                // 差异：上游只扫顶层文档，本地按 videoFrameMaxDepth 递归到内容帧（本地视频多在内嵌帧里）。
+                const scan = (doc, depth) => {
+                    if (!doc || depth > this.configs.videoFrameMaxDepth) return false;
+                    try {
+                        const imgs = Array.from(doc.querySelectorAll('#fcqrimg'));
+                        for (const img of imgs) {
+                            const src = img && img.getAttribute ? img.getAttribute('src') : null;
+                            if (src && String(src).length > 0) return true;
+                        }
+                    } catch (e) { /* ignore */ }
+                    try {
+                        const masks = Array.from(doc.querySelectorAll('.chapterVideoFaceMaskDiv'));
+                        for (const mask of masks) {
+                            const display = mask && mask.style ? String(mask.style.display || '') : '';
+                            if (display !== 'none') return true;
+                        }
+                    } catch (e) { /* ignore */ }
+                    let frames = [];
+                    try { frames = Array.from(doc.querySelectorAll('iframe, frame')); } catch (e) { frames = []; }
+                    for (const frame of frames) {
+                        let child = null;
+                        try { child = frame.contentDocument; } catch (e) { child = null; }
+                        if (child && scan(child, depth + 1)) return true;
+                    }
+                    return false;
+                };
+                try {
+                    return scan(typeof document === 'undefined' ? null : document, 0);
+                } catch (e) {
+                    return false;
+                }
+            },
+            _waitForFaceRecognition() {
+                // 命中后暂停自动推进：清待执行跳转 + 停视频监控，避免人脸期间反复抢播耗尽保活预算。
+                this._faceWaitActive = true;
+                this._clearTimers();
+                this._clearCheckInterval();
+                if (!this._faceWaitNotified) {
+                    this._faceWaitNotified = true;   // 上游 notified：只提示一次，避免轮询刷屏
+                    console.warn('%c[人脸识别] 检测到人脸识别，请手动完成识别后脚本会自动继续', 'color:#FF9800');
+                    console.log('说明：识别期间脚本不会抢播、也不会跳过该任务点；识别完成后视频会自动恢复播放。');
+                }
+            },
+            _maybeResumeAfterFaceRecognition() {
+                // 人脸消失 → 自动恢复（调用既有 play()，由它重建视频监控与保活）。
+                if (!this._faceWaitActive) return false;
+                if (this.configs.interactionFaceWait === false) {
+                    this._faceWaitActive = false;
+                    this._faceWaitNotified = false;
+                    return false;
+                }
+                if (this._hasFaceRecognition()) return false;    // 仍在识别中：继续等（上游同样无超时）
+                this._faceWaitActive = false;
+                this._faceWaitNotified = false;                  // 下次人脸再出现时重新提示一次
+                console.log('%c[人脸识别] 人脸识别已完成，恢复自动播放', 'color:#4CAF50');
+                this.play();
+                return true;
+            },
             _startInteractionWatcher() {
                 // F5（#29 #39）：只检测、只暂停；全脚本没有任何自动答题/外部模型调用。
                 if (!this.configs.interactionGuard) return;
                 if (this._interactionWatcher) return;
                 this._interactionWatcher = setInterval(() => {
                     try {
+                        // F66（V3.7）：坏片探测的兜底入口 —— 视频监控链只在 play()（或静音兜底）成功后才启动，
+                        // 「一直播放失败」的永久坏片场景它压根不会跑；互动轮询是 run() 时建立、destroy() 时清理的
+                        // 常驻既有循环，用它兜底既能覆盖该场景，又不新增任何定时器。
+                        if (this._maybeSkipOnVideoFailText()) return;
+                        // F68（V3.7）：人脸识别消失检测 —— 复用这条 run() 时建立、destroy() 时清理的既有轮询，
+                        // 不新建任何定时器（上游是每 3 秒轮询；本地互动轮询默认 1.5 秒，粒度更细）。
+                        if (this._maybeResumeAfterFaceRecognition()) return;
                         this._checkInteractionDialog();
                         this._guiRefreshStatus(false);
                         if (!this._interactionBlocked) {
@@ -2556,6 +2860,11 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                             // 点「去学习/去完成」回到未完成任务点（受冷却与次数上限约束），不点「下一节」硬闯。
                             this._handleTaskPointDialog('monitor');
                         }
+                        // F67（V3.7）：章节未完成数的第二数据源交叉校验 —— 挂在常驻轮询上才能覆盖所有节点
+                        //（正常播放的视频节点不走 _countUnfinishedTaskPoints，只挂那里会有覆盖盲区）。
+                        // 本地统计传 null：本节只做章节级校验，避免拿不到图标级统计时产生无意义的节点级告警；
+                        // 日志在 _crossCheckChapterCount 内部按数值去重，因此不会每 1.5 秒刷屏。
+                        this._crossCheckChapterCount(null, null);
                     } catch (e) {
                         console.error('互动弹窗检测失败:', e);
                     }
@@ -5279,6 +5588,9 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                 this._guiDestroy();
                 // F10（V3.5）：中止在途 LLM 请求，避免 destroy 后回调再操作页面。
                 this._llmCancelInFlight('destroy');
+                // F68（V3.7）：人脸等待状态清零，避免 destroy→run 后残留「等人脸」标志导致自动推进停摆。
+                this._faceWaitActive = false;
+                this._faceWaitNotified = false;
                 // F4（#32 #54 #55）：守卫相关的延时器、视频事件、用户交互监听全部清理干净。
                 this._clearTimers();
                 this._detachVideoEvents();

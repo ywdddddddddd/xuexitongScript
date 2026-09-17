@@ -76,6 +76,7 @@ autoplay: true
 retryInterval: 2000
 maxRetries: 10
 videoCheckInterval: 1000
+videoFailTextSkip: true
 guardNoProgressMs: 7000
 guardResumeCooldownMs: 1500
 guardPausedGraceMs: 1200
@@ -89,16 +90,23 @@ autoAdvanceNoVideo: false
 maxConsecutiveNoVideoAdvances: 3
 concurrentPlayback: false
 concurrentLanes: 2
+laneKeeperIntervalMs: 3000
+laneMaxReplaysPerUnit: 240
 videoFrameMaxDepth: 4
 interactionGuard: true
 interactionPollMs: 1500
+interactionFaceWait: true
 taskDialogClickCooldownMs: 8000
 taskDialogMaxClicksPerUnit: 3
 videoTaskFrameMaxDepth: 4
 videoTaskFrameMaxCount: 12
+chapterCountCrossCheck: true
 videoCompleteRatio: 0.9
 pauseGuard: true
 cxSecretDecode: true
+cxSecretFontMode: 'auto'
+chapterStudyCount: 0
+chapterStudyDelayMs: 2500
 workSanityLock: true
 docTaskScroll: true
 docTaskScrollStepMs: 800
@@ -118,6 +126,12 @@ llmModelFallbackOn: false
 llmMaxTokens: 2048
 llmJsonMode: true
 llmTimeoutMs: 30000
+llmRetryIntervalMs: 60000
+llmMaxRetries: 5
+llmSkipNodeAfterRetries: true
+surveyDetect: true
+surveyAutoFill: true
+surveySubmit: true
 llmMinIntervalMs: 800
 liveGuard: true
 llmMaxAnswersPerSession: 50
@@ -125,6 +139,7 @@ llmAutoSubmit: false
 llmChapterTest: false
 llmEmbeddedWork: false
 llmWorkWaitMs: 90000
+workDraftOnUncertain: true
 ```
 
 关键项说明：
@@ -134,9 +149,12 @@ llmWorkWaitMs: 90000
 - `maxConsecutiveNoVideoAdvances`（默认 3）：连续自动前进的上限，防止在异常目录结构里死循环。
 - `resumeMaxAttemptsPerUnit`（默认 5）：每个小节内最多主动恢复播放的次数；`guardResumeCooldownMs` 是两次恢复之间的冷却。连续抢播 `pause` 会显著提高触发平台风控/验证码的概率（反馈 #54）。
 - `videoFrameMaxDepth`（默认 4）：嵌套 iframe 的搜索深度上限，带自我保护，不会无限递归。
+- `chapterCountCrossCheck`（默认 **true**，V3.7 补丁 F67）：章节未完成数的**第二数据源交叉校验**（移植上游 ocsjs `cx.ts:1138-1145` 的 `getChapterInfos`）。脚本额外遍历 `[onclick^="getTeacherAjax"]`，用正则 `\('(.*)','(.*)','(.*)'\)` 的第 3 组取 `chapterId`，并读同级容器里的 `.jobUnfinishCount`（服务端渲染的未完成数），与本地 DOM 统计对照：章节级（激活章的未完成数 vs 该章内各节点未完成数之和）与任务点级（当前节点未完成数 vs `.ans-job-icon` 图标级统计）。两者不一致时**采用服务端计数**并打印 `[章节校验]` 日志，用于提前发现平台 DOM 改版。本开关**只做交叉校验与日志**，不替换既有完成判定的主口径。
 - `guardRecoveryProbeMs` / `guardSeekBackSeconds` / `guardSeekBackMaxPerUnit`（默认 2500ms / 0.15s / 2 次）：保活阶梯的第二、三级——恢复动作后 2.5 秒复检，仍无进展才轻微回拨并重播；回拨次数与恢复次数共用「每小节 5 次」预算。
 - `playTimeoutMs`（默认 8000ms）：`play()` Promise 超时保护——媒体管线冻结时 `play()` 可能既不成功也不失败，超时后按播放失败走重试/静音兜底。
 - `interactionGuard`（默认 true）：检测视频互动答题弹窗并暂停自动跳转；脚本不会自动答题。
+- `interactionFaceWait`（默认 **true**，V3.7 补丁 F68）：人脸识别的检测与等待（移植上游 ocsjs `cx.ts:2221-2246 / 2250-2300 / 1757-1758`）。命中判定与上游一致：`#fcqrimg` 的 `src` 非空，或 `.chapterVideoFaceMaskDiv` 的 `style.display` 不为 `none`。命中后脚本**暂停自动推进**（清掉待执行跳转 + 停止视频监控，与互动弹窗同一套「等人工」手法），打印一次 `[人脸识别] 检测到人脸识别，请手动完成识别后脚本会自动继续`（只提示一次，不刷屏），人脸消失后**自动恢复**播放并重建保活。检测点挂在 `play()` 入口与 `nextUnit()` 入口（任何推进路径的公共必经点），消失检测复用既有互动轮询链，不新增定时器；**无超时**，会一直等人工完成。
+- `videoFailTextSkip`（默认 **true**，V3.7 补丁 F66）：视频加载失败的显式跳过（移植上游 ocsjs `cx.ts:1742-1753`）。平台播放器在片源损坏 / 格式不支持 / 下载中断时，会在 `.vjs-modal-dialog-content` 里给出「视频文件损坏」「网络错误导致视频下载中途失败」「视频因格式不支持」「网络的问题无法加载」四条文案之一；这类失败**重试无法恢复**，原先会白烧 `maxRetries` 次重试。开启后脚本每 3 秒探测一次（复用既有视频监控链 + 互动轮询链，不新增定时器），命中即打印 `[视频跳过]` 日志并走既有推进路径（小节内还有未完成的视频任务点先切任务点，否则跳下一小节）。**不会伪造完成标记**（不添加 `ans-job-finished`），该任务点仍需人工处理或向老师反馈。
 - `taskDialogClickCooldownMs` / `taskDialogMaxClicksPerUnit`（默认 8000ms / 3 次）：处理平台「当前章节还有任务点未完成」弹窗时的冷却与每小节次数上限，避免反复点击（#43 #54）。
 - `guiEnabled`（默认 **true**）：右上角可视化监控面板，显示播放状态、进度、LLM 状态与实时日志；纯本地 DOM，不产生网络请求。V3.6 补丁（GUI v2）：卡片式深色面板、运行状态指示灯、视频进度条与平滑动画、开/关按钮配色、更大的点击区域与悬停反馈。
 - `llmEnabled`（默认 **false**）：是否允许调用大模型自动选择互动题答案。开启前先配置密钥（面板「设置 Key」或 `app.setLlmKey(...)`，密钥只存内存、绝不落盘）。
