@@ -1417,14 +1417,34 @@
                 //   本小节没有任何任务点 / 全部任务点均已完成 → 按「已完成/无任务点」处理并推进（受上限约束）。
                 if (!verdict.completed) {
                     const tp = this._countUnfinishedTaskPoints();
+                    // F67（V3.7）：服务端「本节点未完成数」（input.jobUnfinishCount）可得时**以它为准**。
+                    // 依据：该计数由平台在章节树里维护，能覆盖「任务点图标尚未进 DOM」的场景；
+                    // 而本地图标级统计在 DOM 未渲染完时会低估未完成数（把"还没看到"误当成"已完成"）。
+                    // 护栏不变：total === 0（一个任务点都找不到）仍按原安全策略处理——无任务点可能是结构未识别，
+                    //   不能因为服务端说 0 就推进；只有「本来就找到过任务点」时才让服务端计数覆盖。
+                    const serverUnfinished = (tp && typeof tp.platformUnfinished === 'number' && !Number.isNaN(tp.platformUnfinished))
+                        ? tp.platformUnfinished : null;
+                    let unfinished = tp.unfinished;
+                    let serverDecided = false;
+                    if (serverUnfinished !== null && tp.total > 0 && serverUnfinished !== tp.unfinished) {
+                        unfinished = serverUnfinished;
+                        serverDecided = true;
+                        console.log('%c[章节校验] 服务端未完成数 ' + serverUnfinished + ' 与本地统计 ' + tp.unfinished
+                            + ' 不一致 → 采用服务端计数（任务点总数 ' + tp.total + '）', 'color:#607D8B');
+                    }
                     // 注意：只有「存在任务点且全部完成」才算完成证据。
                     // total === 0（完全找不到任务点）必须保持原有安全策略（默认停止/配置内有界前进），
                     // 否则会破坏 F3 的安全停止设计（无任务点可能意味着结构未识别）。
-                    if (tp.total > 0 && tp.unfinished === 0) {
+                    if (tp.total > 0 && unfinished === 0) {
                         verdict.completed = true;
-                        verdict.signals = (verdict.signals || []).concat(['全部 ' + tp.total + ' 个任务点均已完成（图标级校验）']);
+                        verdict.signals = (verdict.signals || []).concat([
+                            serverDecided
+                                ? '全部 ' + tp.total + ' 个任务点均已完成（服务端计数 ' + serverUnfinished + '）'
+                                : '全部 ' + tp.total + ' 个任务点均已完成（图标级校验）',
+                        ]);
                     } else {
-                        console.warn('%c[任务点校验] 本小节仍有 ' + tp.unfinished + '/' + tp.total + ' 个任务点未完成，按未识别流程处理', 'color:#FF9800');
+                        console.warn('%c[任务点校验] 本小节仍有 ' + unfinished + '/' + tp.total + ' 个任务点未完成，按未识别流程处理',
+                            'color:#FF9800');
                     }
                 }
 

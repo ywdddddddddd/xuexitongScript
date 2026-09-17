@@ -2966,6 +2966,85 @@ test('F65-5 surveySubmit=false 时只填答不提交（配置开关生效）', a
 });
 
 // ---------------------------------------------------------------------------
+// F69：F67「以服务端计数为准」真正参与主判定 + 护栏不变
+// 背景：F67 引入第二数据源（input.jobUnfinishCount）后，只在交叉校验层输出裁决值。
+//       本组固定「服务端计数优先」的实际行为，并验证 total===0 的安全护栏不被削弱。
+// ---------------------------------------------------------------------------
+
+/** 构造一个节点：往里注入 2 个任务点（可指定是否已完成），并带上服务端未完成数 */
+function nodeWithServerCount(env, serverUnfinished, opts = {}) {
+    const doc = env.window.document;
+    const node = doc.querySelector('.posCatalog_active');
+    if (!node) throw new Error('目录里没有 .posCatalog_active');
+    const svr = Number.isFinite(serverUnfinished) ? String(serverUnfinished) : '';
+    if (opts.emptyPoints) {
+        // 刻意不放任何 .ans-job-icon：模拟「一个任务点都找不到」
+        node.insertAdjacentHTML('beforeend', '<input class="jobUnfinishCount" value="' + svr + '">');
+        return;
+    }
+    // 本地统计口径：.ans-job-icon 的父容器带 ans-job-finished 即视为已完成
+    node.insertAdjacentHTML('beforeend',
+        '<div class="ans-job ans-job-finished"><span class="ans-job-icon"></span></div>'
+        + '<div class="ans-job ans-job-finished"><span class="ans-job-icon"></span><input class="jobUnfinishCount" value="' + svr + '"></div>');
+}
+
+test('F69-1 服务端说还有未完成 → 即使本地统计为 0 也不推进（采用服务端计数）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1', '1.2'])) });
+    nodeWithServerCount(env, 1);
+    const app = await env.boot();
+    const tp = app._countUnfinishedTaskPoints();
+    check('F69-1 本地统计口径：找到任务点且全部已完成',
+        tp.total > 0 && tp.unfinished === 0, 'total=' + tp.total + ' unfinished=' + tp.unfinished);
+    check('F69-1 读到服务端未完成数', tp.platformUnfinished === 1, 'platformUnfinished=' + tp.platformUnfinished);
+
+    const before = env.treeClicks().length;
+    app._consecutiveNoVideoAdvances = 0;
+    app._handleNoVideoNode();
+    await env.advance(4000);
+    check('F69-1 服务端未完成不为 0 → 不自动前进', env.treeClicks().length === before,
+        JSON.stringify(env.treeClickTitles()));
+    check('F69-1 日志采用服务端计数', env.xt.has('采用服务端计数'),
+        JSON.stringify(env.xt.logs.slice(-4)));
+    check('F69-1 前进计数未被计入', app._consecutiveNoVideoAdvances === 0, String(app._consecutiveNoVideoAdvances));
+    app.destroy();
+});
+
+test('F69-2 服务端与本地都为 0 → 正常按完成推进（不因新增逻辑而卡住）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1', '1.2'])) });
+    nodeWithServerCount(env, 0);
+    const app = await env.boot();
+    const tp = app._countUnfinishedTaskPoints();
+    check('F69-2 两边计数一致均为 0', tp.unfinished === 0 && tp.platformUnfinished === 0,
+        'unfinished=' + tp.unfinished + ' platform=' + tp.platformUnfinished);
+    // boot 自身可能已推进过一节；这里把计数与状态复位，单独验证「服务端计数为 0」时的推进路径。
+    const before = env.treeClicks().length;
+    app._consecutiveNoVideoAdvances = 0;
+    app._handleNoVideoNode();
+    await env.advance(4000);
+    check('F69-2 服务端计数为 0 时照常推进（不被新逻辑挡住）',
+        env.treeClicks().length > before || app._consecutiveNoVideoAdvances > 0,
+        JSON.stringify(env.treeClickTitles()) + ' adv=' + app._consecutiveNoVideoAdvances);
+    check('F69-2 未误报「采用服务端计数」（两边一致无需裁决）', !env.xt.has('采用服务端计数'),
+        JSON.stringify(env.xt.logs.slice(-3)));
+    app.destroy();
+});
+
+test('F69-3 护栏反例：一个任务点都找不到时，服务端计数为 0 也不得推进（F3 安全停止不被削弱）', async () => {
+    const env = createEnv({ html: tree(chapterSpecs(['1.1', '1.2'])) });
+    nodeWithServerCount(env, 0, { emptyPoints: true });
+    const app = await env.boot();
+    const tp = app._countUnfinishedTaskPoints();
+    check('F69-3 本地找不到任务点（total=0）', tp.total === 0, 'total=' + tp.total);
+    app._consecutiveNoVideoAdvances = 0;
+    const before = env.treeClicks().length;
+    app._handleNoVideoNode();
+    await env.advance(4000);
+    check('F69-3 total=0 时不冒充完成、不推进', env.treeClicks().length === before, JSON.stringify(env.treeClickTitles()));
+    check('F69-3 未被计入自动前进次数', app._consecutiveNoVideoAdvances === 0, String(app._consecutiveNoVideoAdvances));
+    app.destroy();
+});
+
+// ---------------------------------------------------------------------------
 // 运行入口
 // ---------------------------------------------------------------------------
 
