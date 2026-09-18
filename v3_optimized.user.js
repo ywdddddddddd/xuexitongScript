@@ -1330,7 +1330,10 @@ window.__XT_FONT_MAP_B64 = 'U8JznH0Kitfq2j1ASTNJjwAAnplxvWFNrqQJItYYkzKDewCySJpU
                     source: serverChapter !== null ? 'server' : 'local',
                 };
                 // 日志去重：同一组数值只播报一次（本函数会被每个节点/每次校验调用）。
-                const key = [result.chapterId, serverChapter, localChapter, serverNode, localUnfinished, localTotal].join('/');
+                // 注意：去重键**不能包含易抖动字段** —— localChapter（章节内未完成数之和）会随平台局部刷新
+                // 在 null/数字之间跳动，把它放进键里会让同一结论每轮都重新打印（真机实测：同一节点每 10 秒刷一条）。
+                // 因此键只保留稳定部分：节点标识 + 两级服务端/本地计数。
+                const key = [result.chapterId, serverChapter, serverNode, localUnfinished, localTotal].join('/');
                 if (this._chapterCountCheckKey !== key) {
                     this._chapterCountCheckKey = key;
                     if (agree === false) {
