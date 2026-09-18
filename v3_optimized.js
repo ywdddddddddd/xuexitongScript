@@ -1310,19 +1310,24 @@
                     unresolved: serverChapter !== null ? serverChapter : localUnfinished,
                     source: serverChapter !== null ? 'server' : 'local',
                 };
-                // 日志去重：同一组数值只播报一次（本函数会被每个节点/每次校验调用）。
-                // 注意：去重键**不能包含易抖动字段** —— localChapter（章节内未完成数之和）会随平台局部刷新
-                // 在 null/数字之间跳动，把它放进键里会让同一结论每轮都重新打印（真机实测：同一节点每 10 秒刷一条）。
-                // 因此键只保留稳定部分：节点标识 + 两级服务端/本地计数。
-                const key = [result.chapterId, serverChapter, serverNode, localUnfinished, localTotal].join('/');
-                if (this._chapterCountCheckKey !== key) {
-                    this._chapterCountCheckKey = key;
+                // 日志去重（两个打印通道各自独立去重，不能共用一个键！）
+                // 真机踩过的坑：这个函数有两个调用点 —— 常驻轮询（本地统计传 null）和节点校验（传真实值 2）。
+                // 若共用一个键，键会在「null 版」与「数值版」之间每轮交替变化，同一结论每 10 秒重打一次。
+                //   章节级键：章节标识 + 两级服务端/本地章节数；
+                //   节点级键：章节标识 + 服务端节点数 + 图标级统计。键里都不放易抖动的 localChapter（轮询时为 null）。
+                const chapterKey = [result.chapterId, serverChapter, localChapter].join('/');
+                if (this._chapterCountCheckKey !== chapterKey) {
+                    this._chapterCountCheckKey = chapterKey;
                     if (agree === false) {
                         console.warn('%c[章节校验] 服务端未完成 ' + serverChapter + ' 与本地统计 ' + localChapter
                             + ' 不一致，采用服务端计数', 'color:#FF9800');
                     } else if (agree === true) {
                         console.log('%c[章节校验] 服务端未完成 ' + serverChapter + ' 与本地统计一致（chapterId=' + (result.chapterId || '未知') + '）', 'color:#607D8B');
                     }
+                }
+                const nodeKey = [result.chapterId, serverNode, localUnfinished, localTotal].join('/');
+                if (this._nodeCountCheckKey !== nodeKey) {
+                    this._nodeCountCheckKey = nodeKey;
                     if (serverNode !== null && localUnfinished !== null && serverNode !== localUnfinished) {
                         console.warn('%c[章节校验] 本节任务点：服务端 ' + serverNode + ' 与本地图标级统计 ' + localUnfinished
                             + ' 不一致，采用服务端计数', 'color:#FF9800');
