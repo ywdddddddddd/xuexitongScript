@@ -1,4 +1,4 @@
-# 学习通全自动刷课脚本
+﻿# 学习通全自动刷课脚本
 
 > 一个把我自己从「无限重复点击」里捞出来的工程。
 > 6 万余行源码，81 个编号故障，从真机上一条一条抠出来的。
@@ -112,7 +112,7 @@
      └────────────────────────────────────────┘
 ```
 
-**单一真源**：所有逻辑写在 `v3_optimized.js`，`v3_optimized.user.js` 由 `scripts/build-userscript.mjs` 生成。**手改产物 = 下次构建被覆盖**。
+**单一真源**：所有逻辑写在 [v3_optimized.js](v3_optimized.js)，[v3_optimized.user.js](v3_optimized.user.js) 由 [scripts/build-userscript.mjs](scripts/build-userscript.mjs) 生成。**手改产物 = 下次构建被覆盖**。
 
 **对抗测试**是刻意设计的反向约束：它扫描源码，禁止出现 `fetch(` / `XMLHttpRequest` / `$.ajax` / `localStorage` / `document.cookie` / `stopPropagation` / `preventDefault` / `mouseout` 等一切可能削弱自动化稳定性或引入隐私风险的写法。**只许收紧，不许放宽。**
 
@@ -133,16 +133,100 @@ node scripts/build-userscript.mjs
 
 ### 2. 配置
 
-首次运行会在控制台引导配置。关键项：
+首次运行会在控制台引导配置。以下是**全部默认值**（与代码 pp.configs 逐项一致，CI 会校验）：
 
-```js
-{
-  cxSecretDecode: true,      // 字体反混淆（默认开，建议保持）
-  cxSecretFontMode: 'auto',  // auto = 哈希优先，失败回退位图
-  autoExam: false,           // 考试自动作答（默认关，见下方警告）
-  workSubmitMode: 'draft',   // 作业：'draft' 只存草稿 | 'submit' 直接提交
-}
+```javascript
+playbackRate: 1.0
+autoplay: true
+retryInterval: 2000
+maxRetries: 10
+videoCheckInterval: 1000
+videoFailTextSkip: true
+guardNoProgressMs: 7000
+guardResumeCooldownMs: 1500
+guardPausedGraceMs: 1200
+guardRecoveryProbeMs: 2500
+guardSeekBackSeconds: 0.15
+guardSeekBackMaxPerUnit: 2
+playTimeoutMs: 8000
+resumeMaxAttemptsPerUnit: 5
+userPauseWindowMs: 2500
+autoAdvanceNoVideo: false
+maxConsecutiveNoVideoAdvances: 3
+concurrentPlayback: false
+concurrentLanes: 2
+laneKeeperIntervalMs: 3000
+laneMaxReplaysPerUnit: 240
+videoFrameMaxDepth: 4
+interactionGuard: true
+interactionPollMs: 1500
+interactionFaceWait: true
+taskDialogClickCooldownMs: 8000
+taskDialogMaxClicksPerUnit: 3
+videoTaskFrameMaxDepth: 4
+videoTaskFrameMaxCount: 12
+chapterCountCrossCheck: true
+videoCompleteRatio: 0.9
+pauseGuard: true
+cxSecretDecode: true
+cxSecretFontMode: 'auto'
+chapterStudyCount: 0
+chapterStudyDelayMs: 2500
+workSanityLock: true
+docTaskScroll: true
+docTaskScrollStepMs: 800
+docTaskMaxMs: 240000
+docTaskWaitMs: 45000
+docTaskAttempts: 2
+discussTaskAuto: true
+discussReplyText: ''
+discussTaskWaitMs: 60000
+guiEnabled: true
+guiMaxLogLines: 60
+llmEnabled: false
+llmEndpoint: 'https://opencode.ai/zen/go/v1/chat/completions'
+llmModel: 'deepseek-v4-flash'
+llmModelFallbacks: []
+llmModelFallbackOn: false
+llmMaxTokens: 2048
+llmJsonMode: true
+llmTimeoutMs: 30000
+llmRetryIntervalMs: 60000
+llmMaxRetries: 5
+llmSkipNodeAfterRetries: true
+surveyDetect: true
+surveyAutoFill: true
+surveySubmit: true
+llmMinIntervalMs: 800
+liveGuard: true
+llmMaxAnswersPerSession: 50
+llmAutoSubmit: false
+llmChapterTest: false
+llmEmbeddedWork: false
+llmWorkWaitMs: 90000
+llmAnswerSeparators: '===,#,---,###,|,;,；,、'
+workDraftOnUncertain: true
+randomFallbackOnUncertain: false
+breakingModeGuard: true
+breakingModeStuckThreshold: 3
+questionCacheEnabled: true
+questionCacheMax: 500
+judgeOptionNormalize: true
+workSubmitMinRate: 0
+timereaderAuto: true
+hyperlinkAuto: true
+pptAudioAuto: true
+
 ```
+
+**几个需要注意的**：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `cxSecretDecode` | `true` | 字体反混淆。关掉的话所有题目都会是乱码 |
+| `cxSecretFontMode` | `auto` | `auto` 哈希优先、失败回退位图；`hash` 只用哈希；`bitmap` 只用位图 |
+| `autoExam` | `false` | 考试自动作答。**默认关闭**，开启前请读免责声明 |
+| `workSubmitMode` | `draft` | 作业：`draft` 只存草稿 ｜ `submit` 直接提交 |
 
 ### 3. 自检
 

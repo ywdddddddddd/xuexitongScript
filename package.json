@@ -1,0 +1,23 @@
+{
+  "name": "xuexitong-automation",
+  "version": "3.7.0",
+  "private": true,
+  "description": "学习通自动化引擎（仅用于技术研究与个人学习效率）",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/verify-v3.mjs && node tests/regression.mjs && node tests/adversarial.mjs",
+    "test:sync": "node tests/verify-v3.mjs",
+    "test:regression": "node tests/regression.mjs",
+    "test:adversarial": "node tests/adversarial.mjs",
+    "build": "node scripts/build-userscript.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ywdddddddddd/xuexitongScript.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "jsdom": "^24.0.0",
+    "jquery": "^3.7.1"
+  }
+}
